@@ -1,11 +1,16 @@
 #include "camera.h"
+#include "format_selection.h"
+#ifndef _WIN32
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
+#endif
 #include <imgui.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #ifdef _WIN32
 #include <windows.h>
+#include <wincodec.h>
+#include <wrl/client.h>
 #include <io.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -18,6 +23,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <ctime>
@@ -115,9 +121,18 @@ public:
         if (id_) glDeleteTextures(1, &id_);
         id_ = 0; width_ = 0; height_ = 0;
     }
-    void update(const cv::Mat& bgr) {
+    void update(const camview::Frame& bgr) {
+#ifdef _WIN32
+        std::vector<unsigned char> rgb(*bgr.pixels);
+        for (size_t i = 0; i + 2 < rgb.size(); i += 3) std::swap(rgb[i], rgb[i + 2]);
+        const int cols = bgr.cols, rows = bgr.rows;
+        const auto* data = rgb.data();
+#else
         cv::Mat rgb;
         cv::cvtColor(bgr, rgb, cv::COLOR_BGR2RGB);
+        const int cols = rgb.cols, rows = rgb.rows;
+        const auto* data = rgb.data;
+#endif
         if (!id_) {
             glGenTextures(1, &id_);
             glBindTexture(GL_TEXTURE_2D, id_);
@@ -126,10 +141,10 @@ public:
         } else glBindTexture(GL_TEXTURE_2D, id_);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
-        if (width_ != rgb.cols || height_ != rgb.rows) {
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, rgb.cols, rgb.rows, 0, GL_RGB, GL_UNSIGNED_BYTE, rgb.data);
-            width_ = rgb.cols; height_ = rgb.rows;
-        } else glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, rgb.cols, rgb.rows, GL_RGB, GL_UNSIGNED_BYTE, rgb.data);
+        if (width_ != cols || height_ != rows) {
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, cols, rows, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
+            width_ = cols; height_ = rows;
+        } else glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, cols, rows, GL_RGB, GL_UNSIGNED_BYTE, data);
         glBindTexture(GL_TEXTURE_2D, 0);
     }
     GLuint id() const { return id_; }
@@ -137,10 +152,54 @@ public:
     int height() const { return height_; }
 };
 
+#ifdef _WIN32
+std::vector<unsigned char> encodePng(const camview::Frame& image) {
+    using Microsoft::WRL::ComPtr;
+    struct ComScope {
+        HRESULT result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        ~ComScope() { if (SUCCEEDED(result)) CoUninitialize(); }
+    } com;
+    if (FAILED(com.result) && com.result != RPC_E_CHANGED_MODE) throw std::runtime_error("无法初始化照片编码器");
+    auto check = [](HRESULT hr) { if (FAILED(hr)) throw std::runtime_error("PNG 编码失败"); };
+    ComPtr<IWICImagingFactory> factory;
+    check(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)));
+    ComPtr<IStream> memory;
+    check(CreateStreamOnHGlobal(nullptr, TRUE, &memory));
+    ComPtr<IWICBitmapEncoder> encoder;
+    check(factory->CreateEncoder(GUID_ContainerFormatPng, nullptr, &encoder));
+    check(encoder->Initialize(memory.Get(), WICBitmapEncoderNoCache));
+    ComPtr<IWICBitmapFrameEncode> frame;
+    check(encoder->CreateNewFrame(&frame, nullptr));
+    check(frame->Initialize(nullptr));
+    check(frame->SetSize(UINT(image.cols), UINT(image.rows)));
+    WICPixelFormatGUID format = GUID_WICPixelFormat24bppBGR;
+    check(frame->SetPixelFormat(&format));
+    if (format != GUID_WICPixelFormat24bppBGR || image.pixels->size() > UINT_MAX)
+        throw std::runtime_error("PNG 图像格式或尺寸不受支持");
+    check(frame->WritePixels(UINT(image.rows), UINT(image.cols * 3), UINT(image.pixels->size()), image.pixels->data()));
+    check(frame->Commit());
+    check(encoder->Commit());
+    STATSTG stat{};
+    check(memory->Stat(&stat, STATFLAG_NONAME));
+    if (stat.cbSize.HighPart) throw std::runtime_error("PNG 图像过大");
+    HGLOBAL global = nullptr;
+    check(GetHGlobalFromStream(memory.Get(), &global));
+    const auto* data = static_cast<const unsigned char*>(GlobalLock(global));
+    if (!data) throw std::runtime_error("无法读取 PNG 图像");
+    std::vector<unsigned char> result(data, data + stat.cbSize.LowPart);
+    GlobalUnlock(global);
+    return result;
+}
+#endif
+
 // Exclusive creation avoids overwriting captures, including simultaneous processes.
-fs::path saveCapture(const cv::Mat& bgr) {
+fs::path saveCapture(const camview::Frame& bgr) {
+#ifdef _WIN32
+    auto encoded = encodePng(bgr);
+#else
     std::vector<uchar> encoded;
     if (!cv::imencode(".png", bgr, encoded)) throw std::runtime_error("PNG 编码失败");
+#endif
     const auto now = std::chrono::system_clock::now();
     const auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count() % 1000;
     const auto seconds = std::chrono::system_clock::to_time_t(now);
@@ -186,7 +245,6 @@ class Application {
     camview::Snapshot state_;
     std::vector<camview::Device> devices_;
     std::vector<camview::Format> formats_;
-    std::vector<std::string> formatLabels_;
     std::unordered_map<unsigned, int> edits_;
     int deviceIndex_ = -1;
     int formatIndex_ = -1;
@@ -211,15 +269,17 @@ class Application {
         status_ = "已停止";
     }
     void loadFormats() {
-        formats_.clear(); formatLabels_.clear(); formatIndex_ = -1;
+        formats_.clear(); formatIndex_ = -1;
         if (deviceIndex_ < 0) return;
         try {
             formats_ = camview::enumerateFormats(devices_.at(size_t(deviceIndex_)), backend());
-            for (const auto& format : formats_) formatLabels_.push_back(format.label());
-            formatIndex_ = formats_.empty() ? -1 : 0;
+            formatIndex_ = camview::closestFormat(formats_, 640, 480, 30.0, camview::mjpgFourcc());
         } catch (const std::exception& e) { status_ = e.what(); }
     }
     void scan() {
+#ifdef _WIN32
+        camview::openCVAvailable(true);
+#endif
         stop(); devices_.clear(); deviceIndex_ = -1;
         try {
             devices_ = camview::enumerateDevices();
@@ -262,17 +322,96 @@ class Application {
         ImGui::SameLine();
         ImGui::SetNextItemWidth(155);
 #ifdef _WIN32
-        if (ImGui::Combo("##backend", &backendIndex_, "OpenCV\0Media Foundation\0")) changeSource();
+        if (ImGui::BeginCombo("##backend", backendIndex_ == 1 ? "Media Foundation" : "OpenCV")) {
+            const bool available = camview::openCVAvailable();
+            ImGui::BeginDisabled(!available);
+            if (ImGui::Selectable(available ? "OpenCV" : "OpenCV（不可用）", backendIndex_ == 0)) {
+                backendIndex_ = 0; changeSource();
+            }
+            ImGui::EndDisabled();
+            if (ImGui::Selectable("Media Foundation", backendIndex_ == 1)) { backendIndex_ = 1; changeSource(); }
+            ImGui::EndCombo();
+        }
 #else
         ImGui::BeginDisabled(); ImGui::Combo("##backend", &backendIndex_, "OpenCV\0"); ImGui::EndDisabled();
 #endif
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(260);
-        const char* mode = formatIndex_ < 0 ? "设备默认格式" : formatLabels_.at(size_t(formatIndex_)).c_str();
-        if (ImGui::BeginCombo("##format", mode)) {
+        ImGui::SetNextItemWidth(120);
+        const auto selected = formatIndex_ < 0 ? camview::Format{} : formats_.at(size_t(formatIndex_));
+        const auto resolution = selected.width ? std::to_string(selected.width) + " x " + std::to_string(selected.height) : "设备默认";
+        if (ImGui::BeginCombo("##resolution", resolution.c_str())) {
             for (size_t i = 0; i < formats_.size(); ++i) {
+                const auto& f = formats_[i];
+                if (f.width <= 0 || f.height <= 0) continue;
+                bool seen = false;
+                for (size_t j = 0; j < i; ++j)
+                    if (formats_[j].width == f.width && formats_[j].height == f.height) { seen = true; break; }
+                if (seen) continue;
+                const auto label = std::to_string(f.width) + " x " + std::to_string(f.height);
                 ImGui::PushID(int(i));
-                if (ImGui::Selectable(formatLabels_[i].c_str(), formatIndex_ == int(i))) {
+                if (ImGui::Selectable(label.c_str(), f.width == selected.width && f.height == selected.height)) {
+                    const int next = camview::closestFormat(formats_, f.width, f.height, selected.fps(), selected.fourcc, true);
+                    if (next >= 0 && next != formatIndex_) {
+                        formatIndex_ = next;
+                        if (opening_ || state_.running) start();
+                    }
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(105);
+        char fpsLabel[32];
+        if (formatIndex_ >= 0) std::snprintf(fpsLabel, sizeof(fpsLabel), "%.3f FPS", selected.fps());
+        else std::snprintf(fpsLabel, sizeof(fpsLabel), "默认帧率");
+        if (ImGui::BeginCombo("##fps", fpsLabel)) {
+            for (size_t i = 0; i < formats_.size(); ++i) {
+                const auto& f = formats_[i];
+                if (f.width != selected.width || f.height != selected.height || !f.fpsDenominator || !f.fpsNumerator) continue;
+                bool seen = false;
+                for (size_t j = 0; j < i; ++j)
+                    if (formats_[j].width == f.width && formats_[j].height == f.height && camview::sameRate(formats_[j], f)) { seen = true; break; }
+                if (seen) continue;
+                char label[32]; std::snprintf(label, sizeof(label), "%.3f FPS", f.fps());
+                ImGui::PushID(int(i));
+                if (ImGui::Selectable(label, camview::sameRate(f, selected))) {
+                    int next = int(i);
+                    for (size_t j = 0; j < formats_.size(); ++j)
+                        if (formats_[j].width == f.width && formats_[j].height == f.height &&
+                            camview::sameRate(formats_[j], f) && formats_[j].fourcc == selected.fourcc) { next = int(j); break; }
+                    if (next != formatIndex_) {
+                        formatIndex_ = next;
+                        if (opening_ || state_.running) start();
+                    }
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(100);
+        auto pixelLabel = [](unsigned fourcc) {
+            std::string name;
+            for (int n = 0; n < 4; ++n) {
+                const char c = char((fourcc >> (n * 8)) & 0xff);
+                name += c >= 32 && c <= 126 ? c : '?';
+            }
+            return name;
+        };
+        const auto pixel = formatIndex_ < 0 ? std::string("默认格式") : pixelLabel(selected.fourcc);
+        if (ImGui::BeginCombo("##pixel", pixel.c_str())) {
+            for (size_t i = 0; i < formats_.size(); ++i) {
+                const auto& f = formats_[i];
+                if (f.width != selected.width || f.height != selected.height || !camview::sameRate(f, selected)) continue;
+                bool seen = false;
+                for (size_t j = 0; j < i; ++j)
+                    if (formats_[j].width == f.width && formats_[j].height == f.height &&
+                        camview::sameRate(formats_[j], f) && formats_[j].fourcc == f.fourcc) { seen = true; break; }
+                if (seen) continue;
+                const auto label = pixelLabel(f.fourcc);
+                ImGui::PushID(int(i));
+                if (ImGui::Selectable(label.c_str(), f.fourcc == selected.fourcc) && int(i) != formatIndex_) {
                     formatIndex_ = int(i);
                     if (opening_ || state_.running) start();
                 }
@@ -392,6 +531,23 @@ class Application {
 public:
     Application() { scan(); }
     ~Application() { camera_.stop(); }
+    ImVec2 initialWindowSize() const {
+        const auto& style = ImGui::GetStyle();
+        const char* buttons[] = {"刷新设备", "打开", "停止", "拍照", "参数"};
+        float width = 170 + 155 + 120 + 105 + 100 + style.ItemSpacing.x * 9 + style.WindowPadding.x * 2;
+        for (const auto* button : buttons)
+            width += ImGui::CalcTextSize(button).x + style.FramePadding.x * 2;
+        width = std::ceil(width);
+        float ratio = 480.0f / 640.0f;
+        if (formatIndex_ >= 0) {
+            const auto& format = formats_.at(size_t(formatIndex_));
+            if (format.width > 0 && format.height > 0) ratio = float(format.height) / format.width;
+        }
+        const float previewHeight = (width - style.WindowPadding.x * 2) * ratio;
+        const float height = std::ceil(previewHeight + style.WindowPadding.y * 2 +
+                                       ImGui::GetFrameHeightWithSpacing() * 2 + style.ItemSpacing.y + 1);
+        return ImVec2(width, height);
+    }
     void poll() {
         state_ = camera_.snapshot();
         if (state_.running && opening_) {
@@ -441,16 +597,22 @@ int run() {
     std::unique_ptr<GLFWwindow, decltype(&glfwDestroyWindow)> window(
         glfwCreateWindow(1280, 800, "CamView - UVC 摄像头", nullptr, nullptr), glfwDestroyWindow);
     if (!window) throw std::runtime_error("无法创建 OpenGL 窗口，请检查显卡驱动是否支持 OpenGL 3.0");
-    glfwSetWindowSizeLimits(window.get(), 960, 600, GLFW_DONT_CARE, GLFW_DONT_CARE);
     glfwMakeContextCurrent(window.get());
     glfwSwapInterval(1);
     ImGuiRuntime imgui(window.get(), glsl);
     Application application;
+    bool sized = false;
     while (!glfwWindowShouldClose(window.get())) {
         glfwPollEvents();
         glfwMakeContextCurrent(window.get());
         application.poll();
         ImGui_ImplOpenGL3_NewFrame(); ImGui_ImplGlfw_NewFrame(); ImGui::NewFrame();
+        if (!sized) {
+            const auto size = application.initialWindowSize();
+            glfwSetWindowSizeLimits(window.get(), int(size.x), 300, GLFW_DONT_CARE, GLFW_DONT_CARE);
+            glfwSetWindowSize(window.get(), int(size.x), int(size.y));
+            sized = true;
+        }
         application.draw();
         ImGui::Render();
         int width = 0, height = 0;

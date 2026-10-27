@@ -1002,25 +1002,33 @@ BOOL MakeGraph()
 }
 
 
-// Keep the preview within 800 x 600 while preserving its aspect ratio.
+// Limit preview width to three quarters of the current monitor width.
+// Monitor and window coordinates use the same Windows DPI scaling.
 // This changes only the display size, not the capture format.
 //
 int gnRecurse = 0;
 
 
-static void LimitPreviewSize(int &w, int &h)
+static void LimitPreviewSizeForScreen(int &w, int &h, int screenWidth)
 {
-    if(w <= 0 || h <= 0) return;
-    double scale = 1.0;
-    if(w > 800) scale = 800.0 / w;
-    if(h * scale > 600) scale = 600.0 / h;
-    if(scale < 1.0)
+    if(w <= 0 || h <= 0 || screenWidth <= 0) return;
+    const int maxWidth = (int)((LONGLONG)screenWidth * 3 / 4);
+    if(maxWidth > 0 && w > maxWidth)
     {
-        w = (int)(w * scale);
-        h = (int)(h * scale);
-        if(w < 1) w = 1;
+        h = (int)((LONGLONG)h * maxWidth / w);
+        w = maxWidth;
         if(h < 1) h = 1;
     }
+}
+
+static void LimitPreviewSize(int &w, int &h)
+{
+    MONITORINFO info = {};
+    info.cbSize = sizeof(info);
+    HMONITOR monitor = MonitorFromWindow(ghwndApp, MONITOR_DEFAULTTONEAREST);
+    const int screenWidth = monitor && GetMonitorInfo(monitor, &info) ?
+        info.rcMonitor.right - info.rcMonitor.left : GetSystemMetrics(SM_CXSCREEN);
+    LimitPreviewSizeForScreen(w, h, screenWidth);
 }
 
 void ResizeWindow(int w, int h)

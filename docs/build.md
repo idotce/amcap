@@ -29,7 +29,7 @@ C:\cmake\bin\cmake.exe --build _build --config Release
 C:\cmake\bin\cmake.exe --install _build --config Release --prefix _install
 ```
 
-构建和安装会将 OpenCV world、MSMF、FFmpeg DLL 与程序放在同一目录，并安装许可证；MF、COM、OpenGL 由操作系统提供。
+构建和安装会将可选 OpenCV 后端、OpenCV world、MSMF、FFmpeg DLL 与程序放在同一目录，并安装许可证。Windows 缺少 OpenCV 插件或主 DLL 时仍可使用 MF，补齐后点击刷新设备重试；MF、COM、WIC、OpenGL 由操作系统提供。
 
 ## Linux / macOS
 
@@ -46,15 +46,15 @@ cmake --install _build --prefix _install
 
 ## 使用
 
-- 顶部同一行选择摄像头、后端、格式，然后点击“打开”。设备选择框宽 170，格式选择框宽 260，不随窗口拉伸；正常预览状态只显示“预览中”。摄像头只显示名称，选择其他设备／后端／格式时，正在运行的采集会重开；切换失败会显示状态，不自动回退原格式。
-- 预览按原始比例显示，纹理仅在新图像到达时更新。左上角白字黑色描边，无底框，显示实际收到的尺寸及约一秒窗口统计的接收帧率。首次帧率统计完成前为 0 FPS。
+- 顶部同一行选择摄像头、后端、分辨率、帧率、像素格式，然后点击“打开”。三个格式下拉框按设备支持的组合联动，默认优先匹配 640×480 30 FPS MJPG；正常预览状态只显示“预览中”。摄像头只显示名称，选择其他设备／后端／格式时，正在运行的采集会重开；切换失败会显示状态，不自动回退原格式。
+- 初始窗口宽度按第一排控件计算，高度按默认选中格式的画面比例计算（无可用格式时按 4:3）；预览按原始比例显示，纹理仅在新图像到达时更新。左上角白字黑色描边，无底框，显示实际收到的尺寸及约一秒窗口统计的接收帧率。首次帧率统计完成前为 0 FPS。
 - 点击“参数”打开独立系统窗口，默认关闭，内有 ProCamp 和 Camera Control 分页。可以独立移动、调整大小、关闭并重新打开；关闭参数窗口不停止采集，主预览始终占满主窗口内容区。
 - 参数只显示驱动实际支持的项目、范围、步长、默认值及当前值。数值离开编辑框／确认后提交，按驱动范围与步长对齐，随后读取驱动结果；自动模式、菜单控制项和不可写状态同样由驱动决定。默认按钮仅恢复默认数值，保留当前自动／手动模式。
 - “拍照”自动将当前图像保存到进程当前工作目录，不弹保存窗口。名称如 `capture_20261027_103015_123.png`，同名追加序号，使用独占创建避免覆盖；状态栏显示完整路径。PNG 不含左上角信息文字。
 
 ## 验证与限制
 
-VS 2019 x64 配置／生成及 Windows 四个应用源文件的 MSVC `/Zs` 检查通过；生成项目中的应用、ImGui 和 GLFW 使用 `/MD`，链接项目内 OpenCV 导入库。未验证动态库链接、程序运行及 Linux/macOS。
+VS 2019 x64 配置／生成及 Windows 四个应用源文件的 MSVC `/Zs` 检查通过；生成项目中的应用、ImGui 和 GLFW 使用 `/MD`；仅 OpenCV 后端插件链接 OpenCV 导入库。未验证动态库链接、程序运行及 Linux/macOS。
 
 未执行 ImGui 主应用完整编译、链接、安装或图形界面实测；多窗口打开／关闭、跨显示器 DPI、中文字体、纹理方向与颜色、中文目录拍照仍需实测。Windows 采集核心的独立测试工具已编译、链接并接入实际摄像头，结果见下文；这不等于主应用完成验证。
 
@@ -76,20 +76,6 @@ VS 2019 x64 配置／生成及 Windows 四个应用源文件的 MSVC `/Zs` 检�
 - **打开摄像头后**关闭自动曝光、保持该设备当前值 `-7`，完整采集线程 MF/NV12 测得约 59.95 FPS，OpenCV/MJPG 约 59.98 FPS。该数值仅是这台相机的测试结果，不在程序中写死，不对其他相机通用。
 - 测试临时更改曝光模式后均恢复原值及自动模式。实际使用时，可在“参数 → Camera Control → 曝光”取消“自动”，再按画面亮度调整。打开／重建采集源可能重新初始化驱动状态，需以打开后的实际读回为准。
 - OpenCV 4.6 DirectShow 设置 FPS 会重建图，原来的“FourCC → 分辨率 → FPS”顺序可能丢失所选像素格式。现改为 FPS → 分辨率 → FourCC，并校验像素格式读回。OpenCV 的 FPS 属性来自其请求值，不能当作实际传输帧率。
-- 基准测得 1080p 额外 `Mat::clone` 约 3.03 ms；Windows 的 MF 和 DirectShow 都输出到每次新建的 Mat，已改为移动帧引用发布，去掉该次复制。实机测试中持有旧快照跨越多帧后，内容保持不变。Linux/macOS 保留原复制行为。
+- 历史测试中额外 `Mat::clone` 约 3.03 ms；目前 Windows 已改为共享 BGR 帧缓冲，新的格式转换与复制性能尚未实测。
 
-每次采集自动在当前工作目录 `_temp/capture-metrics.csv` 追加诊断记录，每秒一行；记录失败不阻止预览。字段：
-
-| 字段 | 含义 |
-| --- | --- |
-| requested_fps | 所选格式的目标 FPS |
-| reported_fps | 后端报告值；MF 为协商媒体类型，OpenCV/DirectShow 可能只是请求值 |
-| received_fps | 按实际收到的图像数量和墙钟时间计算，与左上角一致 |
-| source_timestamp_fps | MF 返回帧的媒体时间戳节奏；OpenCV 不提供时为 0，不能当作传感器实测 FPS |
-| read_ms | 每帧平均读取耗时，含等待、驱动及后端内部解码／转换 |
-| convert_ms | MF 读取返回后的缓冲处理、BGRA→BGR 耗时；OpenCV 此项为 0 |
-| publish_ms | 发布帧及等待快照锁的平均耗时 |
-| controls_ms | 参数读写／命令处理的平均耗时 |
-| empty_reads | 本统计窗口中没有图像的读取次数 |
-
-启动时格式切换、控制读取和曝光适应会影响第一秒，稳定后再比较。日志能够辅助定位，单靠 read_ms 高不能直接区分设备等待与后端解码。自动曝光允许依光照改变帧率的机制可参见 [Microsoft 相机自动曝光优先级说明](https://learn.microsoft.com/en-us/windows-hardware/drivers/stream/ksproperty-cameracontrol-auto-exposure-priority)；OpenCV 行为依据 [4.6 DirectShow 源码](https://github.com/opencv/opencv/blob/4.6.0/modules/videoio/src/cap_dshow.cpp)。
+程序运行时不再创建 `_temp` 或写采集诊断日志；已有日志不会自动删除。构建脚本仍在其项目目录的 `_temp/build.log` 记录构建输出。

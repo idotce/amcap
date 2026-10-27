@@ -5,7 +5,7 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <wrl/client.h>
-#include <opencv2/imgproc.hpp>
+
 #include <algorithm>
 #include <cstring>
 #include <chrono>
@@ -130,7 +130,7 @@ public:
         if (format.width && (format.width != width_ || format.height != height_))
             throw std::runtime_error("MF 实际尺寸与所选格式不符");
     }
-    bool read(cv::Mat& bgr) override {
+    bool read(Frame& bgr) override {
         DWORD flags = 0;
         LONGLONG timestamp = 0;
         ComPtr<IMFSample> sample;
@@ -147,14 +147,23 @@ public:
         info_.timestampSeconds = double(timestamp) / 10000000.0;
         ComPtr<IMFMediaBuffer> buffer;
         check(sample->ConvertToContiguousBuffer(&buffer), "无法获取 MF 图像缓冲区");
-        cv::Mat bgra(height_, width_, CV_8UC4);
+        bgr.cols = width_; bgr.rows = height_;
+        bgr.pixels = std::make_shared<std::vector<unsigned char>>(size_t(width_) * height_ * 3);
+        const auto copyRow = [&](int y, const BYTE* source) {
+            auto* dest = bgr.pixels->data() + size_t(y) * width_ * 3;
+            for (int x = 0; x < width_; ++x) {
+                dest[x * 3] = source[x * 4];
+                dest[x * 3 + 1] = source[x * 4 + 1];
+                dest[x * 3 + 2] = source[x * 4 + 2];
+            }
+        };
         ComPtr<IMF2DBuffer> surface;
         if (SUCCEEDED(buffer.As(&surface))) {
             BYTE* row = nullptr;
             LONG pitch = 0;
             check(surface->Lock2D(&row, &pitch), "无法锁定二维图像");
             if (std::abs(pitch) < width_ * 4) { surface->Unlock2D(); throw std::runtime_error("MF 图像步长无效"); }
-            for (int y = 0; y < height_; ++y) std::memcpy(bgra.ptr(y), row + ptrdiff_t(y) * pitch, size_t(width_) * 4);
+            for (int y = 0; y < height_; ++y) copyRow(y, row + ptrdiff_t(y) * pitch);
             surface->Unlock2D();
         } else {
             BYTE* data = nullptr;
@@ -166,10 +175,9 @@ public:
                 throw std::runtime_error("MF 图像缓冲区长度不足");
             }
             const BYTE* first = stride_ < 0 ? data + stride * size_t(height_ - 1) : data;
-            for (int y = 0; y < height_; ++y) std::memcpy(bgra.ptr(y), first + ptrdiff_t(y) * stride_, size_t(width_) * 4);
+            for (int y = 0; y < height_; ++y) copyRow(y, first + ptrdiff_t(y) * stride_);
             buffer->Unlock();
         }
-        cv::cvtColor(bgra, bgr, cv::COLOR_BGRA2BGR);
         info_.convertMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - convertStart).count();
         return true;
     }

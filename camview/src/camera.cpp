@@ -1,9 +1,10 @@
 #include "camera.h"
+#ifndef _WIN32
 #include <opencv2/videoio.hpp>
+#endif
 #include <chrono>
 #include <cmath>
 #include <filesystem>
-#include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -22,6 +23,36 @@ std::string Format::label() const {
     }
     return out.str();
 }
+#ifdef _WIN32
+using CreateOpenCV = Capture* (*)();
+static CreateOpenCV openCVFactory(bool retry = false) {
+    static std::mutex mutex;
+    static bool attempted = false;
+    static CreateOpenCV factory = nullptr;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!attempted || (retry && !factory)) {
+        attempted = true;
+        factory = []() -> CreateOpenCV {
+        wchar_t path[32768]{};
+        const DWORD size = GetModuleFileNameW(nullptr, path, DWORD(std::size(path)));
+        if (!size || size >= std::size(path)) return nullptr;
+        std::filesystem::path plugin = std::filesystem::path(path).parent_path() / L"camview_opencv_backend.dll";
+        HMODULE module = LoadLibraryExW(plugin.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        if (!module) return nullptr;
+        auto create = reinterpret_cast<CreateOpenCV>(GetProcAddress(module, "createOpenCVCapture"));
+        if (!create) FreeLibrary(module);
+            return create;
+        }();
+    }
+    return factory;
+}
+bool openCVAvailable(bool retry) { return openCVFactory(retry) != nullptr; }
+std::unique_ptr<Capture> makeOpenCV() {
+    const auto create = openCVFactory();
+    if (!create) throw std::runtime_error("OpenCV 后端不可用，请检查程序目录中的 OpenCV DLL");
+    return std::unique_ptr<Capture>(create());
+}
+#else
 class OpenCVCapture final : public Capture {
     cv::VideoCapture capture_;
     CaptureInfo info_;
@@ -73,6 +104,8 @@ public:
     CaptureInfo info() const override { return info_; }
 };
 std::unique_ptr<Capture> makeOpenCV() { return std::make_unique<OpenCVCapture>(); }
+bool openCVAvailable(bool) { return true; }
+#endif
 Camera::~Camera() { stop(); }
 void Camera::start(Device device, Format format, Backend backend) {
     stop();
@@ -106,11 +139,11 @@ void Camera::run(Device device, Format format, Backend backend) {
     }
 #endif
     try {
-        auto capture = makeOpenCV();
 #ifdef _WIN32
-        if (backend == Backend::MediaFoundation) capture = makeMediaFoundation();
+        auto capture = backend == Backend::MediaFoundation ? makeMediaFoundation() : makeOpenCV();
 #else
         (void)backend;
+        auto capture = makeOpenCV();
 #endif
         capture->open(device, format);
         std::unique_ptr<Controls> controls;
@@ -134,24 +167,7 @@ void Camera::run(Device device, Format format, Backend backend) {
         auto lastFrame = previous;
         unsigned count = 0;
         double fps = 0;
-        double readMs = 0, convertMs = 0, publishMs = 0, controlsMs = 0;
-        double firstTimestamp = -1, lastTimestamp = -1;
-        unsigned timestampCount = 0, emptyReads = 0;
-        const auto started = previous;
-        std::ofstream metrics;
-        try {
-            const auto directory = std::filesystem::current_path() / "_temp";
-            std::filesystem::create_directories(directory);
-            const auto path = directory / "capture-metrics.csv";
-            metrics.open(path, std::ios::app);
-            if (metrics) {
-                metrics << "\n# session " << device.name << " " << format.label() << '\n';
-                metrics << "elapsed_s,backend,width,height,requested_fps,reported_fps,received_fps,source_timestamp_fps,read_ms,convert_ms,publish_ms,controls_ms,empty_reads\n";
-                metrics << std::fixed << std::setprecision(3);
-            }
-        } catch (const std::exception&) { /* Diagnostics must not prevent capture. */ }
         while (!stopping_) {
-            const auto controlsStart = std::chrono::steady_clock::now();
             std::vector<Change> changes;
             { std::lock_guard<std::mutex> lock(mutex_); changes.swap(changes_); }
             if (controls && !changes.empty()) {
@@ -166,14 +182,9 @@ void Camera::run(Device device, Format format, Backend backend) {
                 ++state_.controlsRevision;
                 state_.notice = error;
             }
-            controlsMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - controlsStart).count();
-            cv::Mat frame;
+            Frame frame;
             const bool received = capture->read(frame);
-            const auto info = capture->info();
-            readMs += info.readMs;
-            convertMs += info.convertMs;
             if (!received) {
-                ++emptyReads;
                 if (std::chrono::steady_clock::now() - lastFrame > std::chrono::seconds(5))
                     throw std::runtime_error("连续 5 秒没有收到图像，设备可能已断开");
                 std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -181,15 +192,8 @@ void Camera::run(Device device, Format format, Backend backend) {
             }
             lastFrame = std::chrono::steady_clock::now();
             ++count;
-            if (info.timestampSeconds >= 0) {
-                if (firstTimestamp < 0) firstTimestamp = info.timestampSeconds;
-                lastTimestamp = info.timestampSeconds;
-                ++timestampCount;
-            }
             const double seconds = std::chrono::duration<double>(lastFrame - previous).count();
             if (seconds >= 1.0) fps = count / seconds;
-            const auto publishStart = std::chrono::steady_clock::now();
-            const int width = frame.cols, height = frame.rows;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
 #ifdef _WIN32
@@ -201,21 +205,8 @@ void Camera::run(Device device, Format format, Backend backend) {
                 state_.measuredFps = fps;
                 ++state_.sequence;
             }
-            publishMs += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - publishStart).count();
             if (seconds >= 1.0) {
-                const double sourceFps = timestampCount > 1 && lastTimestamp > firstTimestamp ?
-                    (timestampCount - 1) / (lastTimestamp - firstTimestamp) : 0;
-                if (metrics) {
-                    metrics << std::chrono::duration<double>(lastFrame - started).count() << ','
-                            << (backend == Backend::MediaFoundation ? "MF" : "OpenCV") << ','
-                            << width << ',' << height << ',' << format.fps() << ',' << info.reportedFps << ','
-                            << fps << ',' << sourceFps << ',' << readMs / count << ',' << convertMs / count << ','
-                            << publishMs / count << ',' << controlsMs / count << ',' << emptyReads << '\n';
-                    metrics.flush();
-                }
                 count = 0; previous = lastFrame;
-                readMs = convertMs = publishMs = controlsMs = 0;
-                firstTimestamp = lastTimestamp = -1; timestampCount = emptyReads = 0;
             }
         }
     } catch (const std::exception& e) {

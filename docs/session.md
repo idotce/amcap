@@ -1,3 +1,43 @@
+### 2026-10-27 17:02 Agent:Codex - AMCap 预览按屏幕与缩放限制
+
+# 需求
+将预览上限改为窗口所在屏幕宽度的 3/4，高度保持比例，并考虑系统缩放。
+
+# 结论
+- 修改：amcap.cpp 用 MonitorFromWindow、GetMonitorInfo 获取当前屏幕宽度，以同一 DPI 虚拟化坐标系下的 3/4 为预览宽度上限，按画面比例缩放高度；系统主屏宽度作为接口失败时的回退，不改变采集格式。
+- 验证：VS2019 Win32 MSVC /Zs 通过；提取实际缩放函数测试 1920、1280 逻辑宽度、竖屏及较小画面通过；git diff --check 通过。
+- 状态：未完整编译、GUI、不同显示器或系统 DPI 缩放实测。
+
+### 2026-10-27 16:59 Agent:Codex - CamView 初始窗口尺寸
+
+# 需求
+初始窗口宽度适配第一排控件，高度按预览画面比例计算。
+
+# 结论
+- 修改：main.cpp 首帧按实际字体、控件宽度及 ImGui 间距计算宽度和最小宽度，按默认选中分辨率计算预览区域高度，无格式时按 640×480；原初始尺寸为 1280×800。
+- 验证：Windows VS2019 Win64 MSVC /Zs 与 git diff --check 通过；未完整编译或 GUI 实测，DPI、屏幕适配待验证。
+
+### 2026-10-27 16:55 Agent:Codex - CamView 格式拆分选择
+
+# 需求
+将分辨率、帧率、像素格式分成三个下拉框，默认匹配最接近 640×480 30 FPS MJPG。
+
+# 结论
+- 修改：main.cpp 三个下拉框根据设备枚举的有效格式联动，分辨率列全部尺寸，帧率按尺寸过滤，像素格式按尺寸和有理数帧率过滤；切换保留兼容选项并按原行为重开预览。format_selection.h 默认依次按尺寸距离、帧率距离、MJPG 偏好选择。
+- 验证：Windows VS2019 Win64 四个应用源文件 MSVC /Zs 通过；单元测试覆盖精确匹配、相同帧率不同有理数、尺寸约束、无格式及回退；git diff --check 通过。
+- 状态：未完整编译、安装或实测界面和摄像头；既有 OpenCV 可选加载修改仍待完整验证。
+
+### 2026-10-27 16:50 Agent:Codex - CamView OpenCV 可选加载及移除采集日志
+
+# 需求
+缺少 OpenCV DLL 时 Windows CamView 仍可启动并使用 MF；不再运行时写入 _temp 和采集诊断文件。
+
+# 结论
+- 修改：Windows 将 OpenCV 采集移到独立 camview_opencv_backend.dll，运行时从程序目录加载并在刷新设备时重试；主程序及 MF 不直接引用 OpenCV。主帧数据使用共享 BGR 缓冲，MF 转换及预览不依赖 OpenCV，照片使用 Windows WIC PNG；原子创建与命名保留。
+- 修改：移除运行时 _temp/capture-metrics.csv 写入与其计时统计，旧文件未删除；构建脚本日志保持原样。非 Windows 沿用 OpenCV 路径。
+- 验证：VS2019 Win64 配置生成及五个源码 /Zs 通过；独立测试实际构建插件，缺少／存在 OpenCV world DLL 分别检测 unavailable／available；WIC PNG 独立测试尺寸与红绿像素通过。主程序生成项目链接项无 OpenCV，插件链接 OpenCV；git diff --check 通过。
+- 状态：未完整编译安装主程序或实测 GUI、MF、OpenCV 摄像头；Linux/macOS 未实测。
+
 ### 2026-10-27 14:25 Agent:Codex - AMCap 预览上限调整
 
 # 需求
