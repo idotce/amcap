@@ -491,33 +491,33 @@ BOOL  CCrossbar::StringFromPinType (TCHAR *pc, int nSize, long lType)
 
     switch (lType) 
     {   
-        case PhysConn_Video_Tuner:           pcT = TEXT("Video Tuner\0");          break;
-        case PhysConn_Video_Composite:       pcT = TEXT("Video Composite\0");      break;
-        case PhysConn_Video_SVideo:          pcT = TEXT("Video SVideo\0");         break;
-        case PhysConn_Video_RGB:             pcT = TEXT("Video RGB\0");            break;
-        case PhysConn_Video_YRYBY:           pcT = TEXT("Video YRYBY\0");          break;
-        case PhysConn_Video_SerialDigital:   pcT = TEXT("Video SerialDigital\0");  break;
-        case PhysConn_Video_ParallelDigital: pcT = TEXT("Video ParallelDigital\0");break;
-        case PhysConn_Video_SCSI:            pcT = TEXT("Video SCSI\0");           break;
-        case PhysConn_Video_AUX:             pcT = TEXT("Video AUX\0");            break;
-        case PhysConn_Video_1394:            pcT = TEXT("Video 1394\0");           break;
-        case PhysConn_Video_USB:             pcT = TEXT("Video USB\0");            break;
-        case PhysConn_Video_VideoDecoder:    pcT = TEXT("Video Decoder\0");        break;
-        case PhysConn_Video_VideoEncoder:    pcT = TEXT("Video Encoder\0");        break;
+        case PhysConn_Video_Tuner:           pcT = TEXT("视频调谐器\0");          break;
+        case PhysConn_Video_Composite:       pcT = TEXT("复合视频\0");      break;
+        case PhysConn_Video_SVideo:          pcT = TEXT("S-Video 视频\0");         break;
+        case PhysConn_Video_RGB:             pcT = TEXT("RGB 视频\0");            break;
+        case PhysConn_Video_YRYBY:           pcT = TEXT("YRYBY 视频\0");          break;
+        case PhysConn_Video_SerialDigital:   pcT = TEXT("串行数字视频\0");  break;
+        case PhysConn_Video_ParallelDigital: pcT = TEXT("并行数字视频\0");break;
+        case PhysConn_Video_SCSI:            pcT = TEXT("SCSI 视频\0");           break;
+        case PhysConn_Video_AUX:             pcT = TEXT("辅助视频\0");            break;
+        case PhysConn_Video_1394:            pcT = TEXT("1394 视频\0");           break;
+        case PhysConn_Video_USB:             pcT = TEXT("USB 视频\0");            break;
+        case PhysConn_Video_VideoDecoder:    pcT = TEXT("视频解码器\0");        break;
+        case PhysConn_Video_VideoEncoder:    pcT = TEXT("视频编码器\0");        break;
     
-        case PhysConn_Audio_Tuner:           pcT = TEXT("Audio Tuner\0");          break;
-        case PhysConn_Audio_Line:            pcT = TEXT("Audio Line\0");           break;
-        case PhysConn_Audio_Mic:             pcT = TEXT("Audio Mic\0");            break;
-        case PhysConn_Audio_AESDigital:      pcT = TEXT("Audio AESDigital\0");     break;
-        case PhysConn_Audio_SPDIFDigital:    pcT = TEXT("Audio SPDIFDigital\0");   break;
-        case PhysConn_Audio_SCSI:            pcT = TEXT("Audio SCSI\0");           break;
-        case PhysConn_Audio_AUX:             pcT = TEXT("Audio AUX\0");            break;
-        case PhysConn_Audio_1394:            pcT = TEXT("Audio 1394\0");           break;
-        case PhysConn_Audio_USB:             pcT = TEXT("Audio USB\0");            break;
-        case PhysConn_Audio_AudioDecoder:    pcT = TEXT("Audio Decoder\0");        break;
+        case PhysConn_Audio_Tuner:           pcT = TEXT("音频调谐器\0");          break;
+        case PhysConn_Audio_Line:            pcT = TEXT("线路输入\0");           break;
+        case PhysConn_Audio_Mic:             pcT = TEXT("麦克风\0");            break;
+        case PhysConn_Audio_AESDigital:      pcT = TEXT("AES 数字音频\0");     break;
+        case PhysConn_Audio_SPDIFDigital:    pcT = TEXT("S/PDIF 数字音频\0");   break;
+        case PhysConn_Audio_SCSI:            pcT = TEXT("SCSI 音频\0");           break;
+        case PhysConn_Audio_AUX:             pcT = TEXT("辅助音频\0");            break;
+        case PhysConn_Audio_1394:            pcT = TEXT("1394 音频\0");           break;
+        case PhysConn_Audio_USB:             pcT = TEXT("USB 音频\0");            break;
+        case PhysConn_Audio_AudioDecoder:    pcT = TEXT("音频解码器\0");        break;
     
         default:
-            pcT = TEXT("Unknown\0");
+            pcT = TEXT("未知\0");
             break;
     }
     

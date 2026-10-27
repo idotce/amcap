@@ -20,6 +20,9 @@
 #include <atlstr.h>
 //strmbasd
 #include <streams.h>
+#include <dvdmedia.h>
+#include <math.h>
+#include <limits.h>
 //project
 #include "amcap.h"
 #include "crossbar.h"
@@ -60,6 +63,31 @@ HDEVNOTIFY ghDevNotify=0;
 PUnregisterDeviceNotification gpUnregisterDeviceNotification=0;
 PRegisterDeviceNotification gpRegisterDeviceNotification=0;
 DWORD g_dwGraphRegister=0;
+CString gszSettingsPath;
+
+static UINT GetAppProfileInt(LPCTSTR section, LPCTSTR key, INT defaultValue)
+{
+    return GetPrivateProfileInt(section, key, defaultValue, gszSettingsPath);
+}
+
+static DWORD GetAppProfileString(LPCTSTR section, LPCTSTR key, LPCTSTR defaultValue,
+                                 LPTSTR value, DWORD size)
+{
+    return GetPrivateProfileString(section, key, defaultValue, value, size, gszSettingsPath);
+}
+
+static BOOL WriteAppProfileString(LPCTSTR section, LPCTSTR key, LPCTSTR value)
+{
+    BOOL result = WritePrivateProfileString(section, key, value, gszSettingsPath);
+    static BOOL reported = FALSE;
+    if(!result && !reported)
+    {
+        reported = TRUE;
+        MessageBox(NULL, TEXT("无法将 amcap.ini 保存到程序目录。"),
+                   TEXT("AMCap"), MB_OK | MB_ICONERROR);
+    }
+    return result;
+}
 
 struct _capstuff
 {
@@ -163,7 +191,7 @@ class CProgress : public CUnknown, public IAMCopyCaptureFileProgress
     STDMETHODIMP Progress(int i)
     {
         TCHAR tach[80];
-        wsprintf(tach, TEXT("Save File Progress: %d%%\0"), i);
+        wsprintf(tach, TEXT("保存文件进度：%d%%\0"), i);
         statusUpdateStatus(ghwndStatus, tach);
         return S_OK;
     };
@@ -196,6 +224,7 @@ BOOL BuildCaptureGraph();
 BOOL BuildPreviewGraph();
 
 void UpdateStatus(BOOL fAllStats);
+void UpdatePreviewStatus();
 void AddDevicesToMenu();
 void ChooseDevices(TCHAR *szVideo, TCHAR *szAudio);
 void ChooseDevices(IMoniker *pmVideo, IMoniker *pmAudio);
@@ -293,6 +322,19 @@ BOOL AppInit(HINSTANCE hInst, HINSTANCE hPrev, int sw)
 
     const DWORD  dwExStyle = 0;
 
+    TCHAR modulePath[32768];
+    DWORD pathLength = GetModuleFileName(NULL, modulePath, NUMELMS(modulePath));
+    if(pathLength == 0 || pathLength >= NUMELMS(modulePath))
+    {
+        MessageBox(NULL, TEXT("无法定位程序目录。"),
+                   TEXT("AMCap"), MB_OK | MB_ICONERROR);
+        return FALSE;
+    }
+    gszSettingsPath = modulePath;
+    int separator = gszSettingsPath.ReverseFind(TEXT('\\'));
+    if(separator < 0) return FALSE;
+    gszSettingsPath = gszSettingsPath.Left(separator + 1) + TEXT("amcap.ini");
+
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     DbgInitialise(hInst);
 
@@ -356,12 +398,12 @@ BOOL AppInit(HINSTANCE hInst, HINSTANCE hPrev, int sw)
     if(ghwndStatus == NULL)
         return(FALSE);
 
-    // Read the capture file name from win.ini
-    GetProfileString(TEXT("annie"), TEXT("CaptureFile"), TEXT(""),
+    // Read the capture file name from amcap.ini
+    GetAppProfileString(TEXT("annie"), TEXT("CaptureFile"), TEXT(""),
         gcap.szCaptureFile,
-        sizeof(gcap.szCaptureFile));
+        NUMELMS(gcap.szCaptureFile));
 
-    // Read the list of devices to use from win.ini
+    // Read the list of devices to use from amcap.ini
     ZeroMemory(gcap.rgpmAudioMenu, sizeof(gcap.rgpmAudioMenu));
     ZeroMemory(gcap.rgpmVideoMenu, sizeof(gcap.rgpmVideoMenu));
     gcap.pmVideo = 0;
@@ -371,42 +413,43 @@ BOOL AppInit(HINSTANCE hInst, HINSTANCE hPrev, int sw)
     TCHAR szVideoDisplayName[1024], szAudioDisplayName[1024];
     *szAudioDisplayName = *szVideoDisplayName = 0; // null terminate
 
-    GetProfileString(TEXT("annie"), TEXT("VideoDevice2"), TEXT(""),
+    GetAppProfileString(TEXT("annie"), TEXT("VideoDevice2"), TEXT(""),
         szVideoDisplayName, NUMELMS(szVideoDisplayName));
-    GetProfileString(TEXT("annie"), TEXT("AudioDevice2"), TEXT(""),
+    GetAppProfileString(TEXT("annie"), TEXT("AudioDevice2"), TEXT(""),
         szAudioDisplayName, NUMELMS(szAudioDisplayName));
 
     gcap.fDeviceMenuPopulated = false;
     AddDevicesToMenu();
 
     // do we want audio?
-    gcap.fCapAudio = GetProfileInt(TEXT("annie"), TEXT("CaptureAudio"), TRUE);
-    gcap.fCapCC    = GetProfileInt(TEXT("annie"), TEXT("CaptureCC"), FALSE);
+    gcap.fCapAudio = GetAppProfileInt(TEXT("annie"), TEXT("CaptureAudio"), TRUE);
+    gcap.fCapCC    = GetAppProfileInt(TEXT("annie"), TEXT("CaptureCC"), FALSE);
 
-    // do we want preview?
-    gcap.fWantPreview = GetProfileInt(TEXT("annie"), TEXT("WantPreview"), FALSE);
+    // Start preview on every launch.
+    gcap.fWantPreview = TRUE;
 
     // which stream should be the master? NONE(-1) means nothing special happens
     // AUDIO(1) means the video frame rate is changed before written out to keep
     // the movie in sync when the audio and video capture crystals are not the
     // same (and therefore drift out of sync after a few minutes).  VIDEO(0)
     // means the audio sample rate is changed before written out
-    gcap.iMasterStream = GetProfileInt(TEXT("annie"), TEXT("MasterStream"), 1);
+    gcap.iMasterStream = GetAppProfileInt(TEXT("annie"), TEXT("MasterStream"), 1);
 
-    // get the frame rate from win.ini before making the graph
-    gcap.fUseFrameRate  = GetProfileInt(TEXT("annie"), TEXT("UseFrameRate"), 1);
-    int units_per_frame = GetProfileInt(TEXT("annie"), TEXT("FrameRate"), 666667);  // 15fps
+    // get the frame rate from amcap.ini before making the graph
+    gcap.fUseFrameRate  = GetAppProfileInt(TEXT("annie"), TEXT("UseFrameRate"), 1);
+    int units_per_frame = GetAppProfileInt(TEXT("annie"), TEXT("FrameRate"), 333333);  // 30fps
+    if(units_per_frame <= 0) units_per_frame = 333333;
     gcap.FrameRate = 10000000. / units_per_frame;
     gcap.FrameRate = (int)(gcap.FrameRate * 100) / 100.;
-	gcap.CaptureWidth  = GetProfileInt(TEXT("annie"), TEXT("CaptureWidth"), 640);
-	gcap.CaptureHeight  = GetProfileInt(TEXT("annie"), TEXT("CaptureHeight"), 360);
+	gcap.CaptureWidth  = GetAppProfileInt(TEXT("annie"), TEXT("CaptureWidth"), 640);
+	gcap.CaptureHeight  = GetAppProfileInt(TEXT("annie"), TEXT("CaptureHeight"), 480);
 
     // reasonable default
     if(gcap.FrameRate <= 0.)
         gcap.FrameRate = 15.0;
 
-    gcap.fUseTimeLimit = GetProfileInt(TEXT("annie"), TEXT("UseTimeLimit"), 0);
-    gcap.dwTimeLimit   = GetProfileInt(TEXT("annie"), TEXT("TimeLimit"), 0);
+    gcap.fUseTimeLimit = GetAppProfileInt(TEXT("annie"), TEXT("UseTimeLimit"), 0);
+    gcap.dwTimeLimit   = GetAppProfileInt(TEXT("annie"), TEXT("TimeLimit"), 0);
 
     // Instantiate the capture filters we need to do the menu items.
     // This will start previewing, if desired
@@ -788,6 +831,11 @@ LONG WINAPI  AppWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             break;
 
         case WM_TIMER:
+            if(wParam == 2)
+            {
+                if(gcap.fPreviewing && !gcap.fCapturing) UpdatePreviewStatus();
+                break;
+            }
             // update our status bar with #captured, #dropped
             // if we've stopped capturing, don't do it anymore.  Some WM_TIMER
             // messages may come late, after we've destroyed the graph and
@@ -867,7 +915,7 @@ LONG WINAPI  AppWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                                         StopCapture();
                                         TCHAR szError[100];
                                         _tcscpy(szError, 
-                                            TEXT("Stopping Capture (Device Lost). Select New Capture Device\0"));
+                                            TEXT("设备已断开，采集已停止。请选择其他采集设备。\0"));
                                         ErrMsg(szError);
                                         break;
                                     }
@@ -884,7 +932,7 @@ LONG WINAPI  AppWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
                             StartPreview();
                         }
                         TCHAR szError[100];
-                        wsprintf(szError, TEXT("ERROR during capture, error code=%08x\0"), hrAbort);
+                        wsprintf(szError, TEXT("采集出错，错误代码=%08x\0"), hrAbort);
                         ErrMsg(szError);
                 }
             }
@@ -954,18 +1002,31 @@ BOOL MakeGraph()
 }
 
 
-// make sure the preview window inside our window is as big as the
-// dimensions of captured video, or some capture cards won't show a preview.
-// (Also, it helps people tell what size video they're capturing)
-// We will resize our app's window big enough so that once the status bar
-// is positioned at the bottom there will be enough room for the preview
-// window to be w x h
+// Keep the preview within 800 x 600 while preserving its aspect ratio.
+// This changes only the display size, not the capture format.
 //
 int gnRecurse = 0;
 
 
+static void LimitPreviewSize(int &w, int &h)
+{
+    if(w <= 0 || h <= 0) return;
+    double scale = 1.0;
+    if(w > 800) scale = 800.0 / w;
+    if(h * scale > 600) scale = 600.0 / h;
+    if(scale < 1.0)
+    {
+        w = (int)(w * scale);
+        h = (int)(h * scale);
+        if(w < 1) w = 1;
+        if(h < 1) h = 1;
+    }
+}
+
 void ResizeWindow(int w, int h)
 {
+    if(w <= 0 || h <= 0) return;
+    LimitPreviewSize(w, h);
     RECT rcW, rcC;
     int xExtra, yExtra;
     int cyBorder = GetSystemMetrics(SM_CYBORDER);
@@ -992,7 +1053,10 @@ void ResizeWindow(int w, int h)
 
     gnRecurse--;
 
-	ResizeChild(rcC.right + xExtra, rcC.bottom + yExtra);
+    GetClientRect(ghwndApp, &rcC);
+    if(GetWindowLong(ghwndStatus, GWL_STYLE) & WS_VISIBLE)
+        rcC.bottom -= cyBorder + statusGetHeight();
+    ResizeChild(rcC.right, rcC.bottom);
 }
 
 void ResizeChild(int sw, int sh)
@@ -1000,6 +1064,7 @@ void ResizeChild(int sw, int sh)
 	int nw = 0, nh = 0, w = 0, h = 0, l = 0, t = 0;
 	
 	ReadVideoPin();
+    if(sw <= 0 || sh <= 0 || gcap.CaptureWidth <= 0 || gcap.CaptureHeight <= 0) return;
 
 	if ((float)sw/(float)sh > (float)gcap.CaptureWidth/(float)gcap.CaptureHeight)
 	{
@@ -1018,8 +1083,11 @@ void ResizeChild(int sw, int sh)
 		w = sw;
 	}
 
-	if(gcap.pVW)
-		gcap.pVW->SetWindowPosition(l, t, w, h);
+    LimitPreviewSize(w, h);
+    l = (sw - w) / 2;
+    t = (sh - h) / 2;
+    if(gcap.pVW)
+        gcap.pVW->SetWindowPosition(l, t, w, h);
 }
 
 void FullScreen()
@@ -1146,6 +1214,98 @@ void TearDownGraph()
 }
 
 
+// Select a format reported by the driver instead of inventing a media type.
+static void SelectStartupFormat(IAMStreamConfig *config, IBaseFilter *filter)
+{
+    int count = 0, size = 0;
+    if(!config || FAILED(config->GetNumberOfCapabilities(&count, &size)) ||
+       count <= 0 || size < (int)sizeof(VIDEO_STREAM_CONFIG_CAPS)) return;
+
+    BYTE *caps = (BYTE *)CoTaskMemAlloc(size);
+    if(!caps) return;
+    IAMVideoControl *control = NULL;
+    IPin *pin = NULL;
+    if(filter) filter->QueryInterface(IID_IAMVideoControl, (void **)&control);
+    config->QueryInterface(IID_IPin, (void **)&pin);
+
+    AM_MEDIA_TYPE *best = NULL;
+    double bestSize = 0., bestRate = 0.;
+    LONGLONG bestInterval = 0;
+    for(int i = 0; i < count; ++i)
+    {
+        AM_MEDIA_TYPE *type = NULL;
+        if(FAILED(config->GetStreamCaps(i, &type, caps)) || !type) continue;
+        BITMAPINFOHEADER *bitmap = NULL;
+        LONGLONG interval = 0;
+        if(type->majortype == MEDIATYPE_Video && type->pbFormat)
+        {
+            if(type->formattype == FORMAT_VideoInfo && type->cbFormat >= sizeof(VIDEOINFOHEADER))
+            {
+                VIDEOINFOHEADER *video = (VIDEOINFOHEADER *)type->pbFormat;
+                bitmap = &video->bmiHeader;
+                interval = video->AvgTimePerFrame;
+            }
+            else if(type->formattype == FORMAT_VideoInfo2 && type->cbFormat >= sizeof(VIDEOINFOHEADER2))
+            {
+                VIDEOINFOHEADER2 *video = (VIDEOINFOHEADER2 *)type->pbFormat;
+                bitmap = &video->bmiHeader;
+                interval = video->AvgTimePerFrame;
+            }
+        }
+        if(!bitmap || bitmap->biWidth <= 0 || bitmap->biHeight == 0 || bitmap->biHeight == LONG_MIN)
+        {
+            DeleteMediaType(type);
+            continue;
+        }
+        int width = bitmap->biWidth, height = ABS(bitmap->biHeight);
+        double dx = (double)width - gcap.CaptureWidth;
+        double dy = (double)height - gcap.CaptureHeight;
+        double distance = dx * dx + dy * dy;
+        double rateDistance = interval > 0 ? fabs(10000000. / interval - gcap.FrameRate) : 1e100;
+        if(control && pin)
+        {
+            SIZE dimensions = { width, height };
+            LONG rateCount = 0;
+            LONGLONG *rates = NULL;
+            if(SUCCEEDED(control->GetFrameRateList(pin, i, dimensions, &rateCount, &rates)) && rates)
+            {
+                for(LONG j = 0; j < rateCount; ++j)
+                {
+                    if(rates[j] <= 0) continue;
+                    double delta = fabs(10000000. / rates[j] - gcap.FrameRate);
+                    if(delta < rateDistance) { rateDistance = delta; interval = rates[j]; }
+                }
+            }
+            CoTaskMemFree(rates);
+        }
+        if(!best || distance < bestSize || (distance == bestSize && rateDistance < bestRate))
+        {
+            if(best) DeleteMediaType(best);
+            best = type;
+            bestSize = distance;
+            bestRate = rateDistance;
+            bestInterval = interval;
+        }
+        else DeleteMediaType(type);
+    }
+    if(best)
+    {
+        if(bestInterval > 0)
+        {
+            if(best->formattype == FORMAT_VideoInfo)
+                ((VIDEOINFOHEADER *)best->pbFormat)->AvgTimePerFrame = bestInterval;
+            else
+                ((VIDEOINFOHEADER2 *)best->pbFormat)->AvgTimePerFrame = bestInterval;
+        }
+        // A driver may reject even a reported mode; leave its current format in that case.
+        config->SetFormat(best);
+        DeleteMediaType(best);
+    }
+    if(pin) pin->Release();
+    if(control) control->Release();
+    CoTaskMemFree(caps);
+}
+
 // create the capture filters of the graph.  We need to keep them loaded from
 // the beginning, so we can set parameters on them and have them remembered
 //
@@ -1159,7 +1319,7 @@ BOOL InitCapFilters()
     f = MakeBuilder();
     if(!f)
     {
-        ErrMsg(TEXT("Cannot instantiate graph builder"));
+        ErrMsg(TEXT("无法创建采集图构建器"));
         return FALSE;
     }
 
@@ -1194,7 +1354,7 @@ BOOL InitCapFilters()
 
     if(gcap.pVCap == NULL)
     {
-        ErrMsg(TEXT("Error %x: Cannot create video capture filter"), hr);
+        ErrMsg(TEXT("错误 %x：无法创建视频采集滤镜"), hr);
         goto InitCapFiltersFail;
     }
 
@@ -1206,14 +1366,14 @@ BOOL InitCapFilters()
     f = MakeGraph();
     if(!f)
     {
-        ErrMsg(TEXT("Cannot instantiate filtergraph"));
+        ErrMsg(TEXT("无法创建滤镜图"));
         goto InitCapFiltersFail;
     }
 
     hr = gcap.pBuilder->SetFiltergraph(gcap.pFg);
     if(hr != NOERROR)
     {
-        ErrMsg(TEXT("Cannot give graph to builder"));
+        ErrMsg(TEXT("无法将滤镜图交给构建器"));
         goto InitCapFiltersFail;
     }
 
@@ -1221,7 +1381,7 @@ BOOL InitCapFilters()
     hr = gcap.pFg->AddFilter(gcap.pVCap, gcap.wachFriendlyName);
     if(hr != NOERROR)
     {
-        ErrMsg(TEXT("Error %x: Cannot add vidcap to filtergraph"), hr);
+        ErrMsg(TEXT("错误 %x：无法将视频采集设备加入滤镜图"), hr);
         goto InitCapFiltersFail;
     }
 
@@ -1257,7 +1417,7 @@ BOOL InitCapFilters()
         if(hr != NOERROR)
         {
             // this means we can't set frame rate (non-DV only)
-            ErrMsg(TEXT("Error %x: Cannot find VCapture:IAMStreamConfig"), hr);
+            ErrMsg(TEXT("错误 %x：视频采集设备不提供格式设置接口"), hr);
         }
     }
 
@@ -1265,24 +1425,7 @@ BOOL InitCapFilters()
 
     AM_MEDIA_TYPE *pmt;
 
-	// set inital capture format
-	hr = gcap.pVSC->GetFormat(&pmt);
-
-    // DV capture does not use a VIDEOINFOHEADER
-    if(hr == NOERROR)
-    {
-        if(pmt->formattype == FORMAT_VideoInfo)
-        {
-            VIDEOINFOHEADER *pvi = (VIDEOINFOHEADER *)pmt->pbFormat;
-            pvi->AvgTimePerFrame = (LONGLONG)(10000000 / gcap.FrameRate);
-			pvi->bmiHeader.biWidth = gcap.CaptureWidth;
-			pvi->bmiHeader.biHeight = gcap.CaptureHeight;
-
-            hr = gcap.pVSC->SetFormat(pmt);
-            if(hr != NOERROR)
-                ErrMsg(TEXT("%x: Cannot set frame rate or resolution for preview"), hr);
-        }
-    }
+    SelectStartupFormat(gcap.pVSC, gcap.pVCap);
 
     // default capture format
     if(gcap.pVSC && gcap.pVSC->GetFormat(&pmt) == S_OK)
@@ -1290,9 +1433,9 @@ BOOL InitCapFilters()
         // DV capture does not use a VIDEOINFOHEADER
         if(pmt->formattype == FORMAT_VideoInfo)
         {
-            // resize our window to the default capture size
-            ResizeWindow(HEADER(pmt->pbFormat)->biWidth,
-                         ABS(HEADER(pmt->pbFormat)->biHeight));
+            // Resize and remember the format actually accepted by the driver.
+            ReadVideoPin();
+            ResizeWindow(gcap.CaptureWidth, gcap.CaptureHeight);
         }
         if(pmt->majortype != MEDIATYPE_Video)
         {
@@ -1395,7 +1538,7 @@ BOOL InitCapFilters()
     {
         // there are no audio capture devices. We'll only allow video capture
         gcap.fCapAudio = FALSE;
-        ErrMsg(TEXT("Cannot create audio capture filter"));
+        ErrMsg(TEXT("无法创建音频采集滤镜"));
         goto SkipAudio;
     }
 
@@ -1430,7 +1573,7 @@ BOOL InitCapFilters()
         hr = gcap.pFg->AddFilter(gcap.pACap, wachAudioFriendlyName);
         if(hr != NOERROR)
         {
-            ErrMsg(TEXT("Error %x: Cannot add audio capture filter to filtergraph"), hr);
+            ErrMsg(TEXT("错误 %x：无法将音频采集设备加入滤镜图"), hr);
             goto InitCapFiltersFail;
         }
     }
@@ -1446,7 +1589,7 @@ BOOL InitCapFilters()
 
     if(hr != NOERROR)
     {
-        ErrMsg(TEXT("Cannot find ACapture:IAMStreamConfig"));
+        ErrMsg(TEXT("无法找到音频采集格式设置接口"));
     }
 
 SkipAudio:
@@ -1559,7 +1702,7 @@ BOOL BuildCaptureGraph()
                                           &gcap.pRender, &gcap.pSink);
     if(hr != NOERROR)
     {
-        ErrMsg(TEXT("Cannot set output file"));
+        ErrMsg(TEXT("无法设置输出文件"));
         goto SetupCaptureFail;
     }
 
@@ -1582,7 +1725,7 @@ BOOL BuildCaptureGraph()
             {
                 hr = gcap.pConfigAviMux->SetMasterStream(gcap.iMasterStream);
                 if(hr != NOERROR)
-                    ErrMsg(TEXT("SetMasterStream failed!"));
+                    ErrMsg(TEXT("设置主同步流失败！"));
             }
         }
     }
@@ -1611,7 +1754,7 @@ BOOL BuildCaptureGraph()
                                              gcap.pVCap, NULL, gcap.pRender);
             if(hr != NOERROR)
             {
-                ErrMsg(TEXT("Cannot render video capture stream"));
+                ErrMsg(TEXT("无法连接视频采集流"));
                 goto SetupCaptureFail;
             }
         }
@@ -1636,7 +1779,7 @@ BOOL BuildCaptureGraph()
                 }
                 else if(hr != S_OK)
                 {
-                    ErrMsg(TEXT("Cannot render video preview stream"));
+                    ErrMsg(TEXT("无法连接视频预览流"));
                     goto SetupCaptureFail;
                 }
             }
@@ -1665,7 +1808,7 @@ BOOL BuildCaptureGraph()
                                          gcap.pACap, NULL, gcap.pRender);
         if(hr != NOERROR)
         {
-            ErrMsg(TEXT("Cannot render audio capture stream"));
+            ErrMsg(TEXT("无法连接音频采集流"));
             goto SetupCaptureFail;
         }
     }
@@ -1685,7 +1828,7 @@ BOOL BuildCaptureGraph()
                                              gcap.pVCap, NULL, gcap.pRender);
             if(hr != NOERROR)
             {
-                ErrMsg(TEXT("Cannot render closed captioning"));
+                ErrMsg(TEXT("无法显示隐藏式字幕"));
                 // so what? goto SetupCaptureFail;
             }
         }
@@ -1711,7 +1854,7 @@ BOOL BuildCaptureGraph()
         hr = gcap.pFg->QueryInterface(IID_IVideoWindow, (void **)&gcap.pVW);
         if(hr != NOERROR && gcap.fWantPreview)
         {
-            ErrMsg(TEXT("This graph cannot preview"));
+            ErrMsg(TEXT("当前滤镜图不支持预览"));
         }
         else if(hr == NOERROR)
         {
@@ -1752,7 +1895,7 @@ BOOL BuildCaptureGraph()
             }
         }
         if(hr != NOERROR)
-            ErrMsg(TEXT("Cannot set frame rate for capture"));
+            ErrMsg(TEXT("无法设置采集帧率"));
     }
 
     // now ask the filtergraph to tell us when something is completed or aborted
@@ -1773,7 +1916,7 @@ BOOL BuildCaptureGraph()
     hr = AddGraphToRot(gcap.pFg, &g_dwGraphRegister);
     if(FAILED(hr))
     {
-        ErrMsg(TEXT("Failed to register filter graph with ROT!  hr=0x%x"), hr);
+        ErrMsg(TEXT("无法将滤镜图注册到 ROT，错误代码=0x%x"), hr);
         g_dwGraphRegister = 0;
     }
 #endif
@@ -1843,7 +1986,7 @@ BOOL BuildPreviewGraph()
                                          &MEDIATYPE_Stream, gcap.pVCap, NULL, NULL);
         if( FAILED( hr ) )
         {
-            ErrMsg(TEXT("Cannot build MPEG2 preview graph!"));
+            ErrMsg(TEXT("无法创建 MPEG-2 预览滤镜图！"));
         }
 
     }
@@ -1868,7 +2011,7 @@ BOOL BuildPreviewGraph()
             }
             else if(hr != S_OK)
             {
-                ErrMsg(TEXT("This graph cannot preview!"));
+                ErrMsg(TEXT("当前滤镜图不支持预览！"));
                 gcap.fPreviewGraphBuilt = FALSE;
                 return FALSE;
             }
@@ -1889,7 +2032,7 @@ BOOL BuildPreviewGraph()
                                                  gcap.pVCap, NULL, NULL);
                 if(hr != NOERROR)
                 {
-                    ErrMsg(TEXT("Cannot render closed captioning"));
+                    ErrMsg(TEXT("无法显示隐藏式字幕"));
                 }
             }
         }
@@ -1907,7 +2050,7 @@ BOOL BuildPreviewGraph()
     hr = gcap.pFg->QueryInterface(IID_IVideoWindow, (void **)&gcap.pVW);
     if(hr != NOERROR)
     {
-        ErrMsg(TEXT("This graph cannot preview properly"));
+        ErrMsg(TEXT("当前滤镜图无法正常预览"));
     }
     else
     {
@@ -1969,7 +2112,7 @@ BOOL BuildPreviewGraph()
     hr = AddGraphToRot(gcap.pFg, &g_dwGraphRegister);
     if(FAILED(hr))
     {
-        ErrMsg(TEXT("Failed to register filter graph with ROT!  hr=0x%x"), hr);
+        ErrMsg(TEXT("无法将滤镜图注册到 ROT，错误代码=0x%x"), hr);
         g_dwGraphRegister = 0;
     }
 #endif
@@ -2006,11 +2149,13 @@ BOOL StartPreview()
     }
     if(FAILED(hr))
     {
-        ErrMsg(TEXT("Error %x: Cannot run preview graph"), hr);
+        ErrMsg(TEXT("错误 %x：无法启动预览"), hr);
         return FALSE;
     }
 
     gcap.fPreviewing = TRUE;
+    SetTimer(ghwndApp, 2, 1000, NULL);
+    UpdatePreviewStatus();
 	// if fullscreen require display again
 	if (GetWindowLong(ghwndApp, GWL_STYLE) & WS_POPUP)
 		SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
@@ -2038,11 +2183,12 @@ BOOL StopPreview()
     }
     if(FAILED(hr))
     {
-        ErrMsg(TEXT("Error %x: Cannot stop preview graph"), hr);
+        ErrMsg(TEXT("错误 %x：无法停止预览"), hr);
         return FALSE;
     }
 
     gcap.fPreviewing = FALSE;
+    KillTimer(ghwndApp, 2);
 
     // get rid of menu garbage
     InvalidateRect(ghwndApp, NULL, TRUE);
@@ -2092,7 +2238,7 @@ BOOL StartCapture()
     hr = gcap.pFg->QueryInterface(IID_IMediaControl, (void **)&pMC);
     if(FAILED(hr))
     {
-        ErrMsg(TEXT("Error %x: Cannot get IMediaControl"), hr);
+        ErrMsg(TEXT("错误 %x：无法获取媒体控制接口"), hr);
         return FALSE;
     }
 
@@ -2112,7 +2258,7 @@ BOOL StartCapture()
         // stop parts that started
         pMC->Stop();
         pMC->Release();
-        ErrMsg(TEXT("Error %x: Cannot start graph"), hr);
+        ErrMsg(TEXT("错误 %x：无法启动滤镜图"), hr);
         return FALSE;
     }
 
@@ -2164,7 +2310,7 @@ BOOL StartCapture()
             // stop parts that started
             pMC->Stop();
             pMC->Release();
-            ErrMsg(TEXT("Error %x: Cannot run graph"), hr);
+            ErrMsg(TEXT("错误 %x：无法运行滤镜图"), hr);
             return FALSE;
         }
     }
@@ -2202,7 +2348,7 @@ BOOL StopCapture()
     }
     if(FAILED(hr))
     {
-        ErrMsg(TEXT("Error %x: Cannot stop graph"), hr);
+        ErrMsg(TEXT("错误 %x：无法停止滤镜图"), hr);
         return FALSE;
     }
 
@@ -2315,19 +2461,19 @@ void MakeMenuOptions()
         hr = gcap.pDlg->HasDialog(VfwCaptureDialog_Format);
         if(SUCCEEDED(hr) && S_FALSE != hr)
         {
-            AppendMenu(hMenuSub, MF_STRING, MENU_DIALOG0 + zz, TEXT("Video Format..."));
+            AppendMenu(hMenuSub, MF_STRING, MENU_DIALOG0 + zz, TEXT("视频格式..."));
             gcap.iFormatDialogPos = zz++;
         }
         hr = gcap.pDlg->HasDialog(VfwCaptureDialog_Source); 
         if(SUCCEEDED(hr) && S_FALSE != hr)
         {
-            AppendMenu(hMenuSub, MF_STRING, MENU_DIALOG0 + zz, TEXT("Video Source..."));
+            AppendMenu(hMenuSub, MF_STRING, MENU_DIALOG0 + zz, TEXT("视频源..."));
             gcap.iSourceDialogPos = zz++;
         }
         hr = gcap.pDlg->HasDialog(VfwCaptureDialog_Display);
         if(SUCCEEDED(hr) && S_FALSE != hr)
         {
-            AppendMenu(hMenuSub, MF_STRING, MENU_DIALOG0 + zz, TEXT("Video Display..."));
+            AppendMenu(hMenuSub, MF_STRING, MENU_DIALOG0 + zz, TEXT("视频显示..."));
             gcap.iDisplayDialogPos = zz++;
         }
     }
@@ -2347,7 +2493,7 @@ void MakeMenuOptions()
             hr = pSpec->GetPages(&cauuid);
             if(SUCCEEDED(hr) && cauuid.cElems > 0)
             {
-                AppendMenu(hMenuSub,MF_STRING,MENU_DIALOG0+zz, TEXT("Audio Capture Filter..."));
+                AppendMenu(hMenuSub,MF_STRING,MENU_DIALOG0+zz, TEXT("音频采集设备属性..."));
                 gcap.iACapDialogPos = zz++;
                 CoTaskMemFree(cauuid.pElems);
             }
@@ -2381,7 +2527,7 @@ void MakeMenuOptions()
         hr = pSpec->GetPages(&cauuid);
         if(SUCCEEDED(hr) && cauuid.cElems > 0)
         {
-            AppendMenu(hMenuSub,MF_STRING,MENU_DIALOG0+zz, TEXT("Video Capture Filter..."));
+            AppendMenu(hMenuSub,MF_STRING,MENU_DIALOG0+zz, TEXT("视频采集设备属性..."));
             gcap.iVCapDialogPos = zz++;
             CoTaskMemFree(cauuid.pElems);
         }
@@ -2408,7 +2554,7 @@ void MakeMenuOptions()
             hr = pSpec->GetPages(&cauuid);
             if(SUCCEEDED(hr) && cauuid.cElems > 0)
             {
-                AppendMenu(hMenuSub,MF_STRING,MENU_DIALOG0+zz, TEXT("Video Capture Pin..."));
+                AppendMenu(hMenuSub,MF_STRING,MENU_DIALOG0+zz, TEXT("视频采集格式..."));
                 gcap.iVCapCapturePinDialogPos = zz++;
                 CoTaskMemFree(cauuid.pElems);
             }
@@ -2438,7 +2584,7 @@ void MakeMenuOptions()
             hr = pSpec->GetPages(&cauuid);
             if(SUCCEEDED(hr) && cauuid.cElems > 0)
             {
-                AppendMenu(hMenuSub,MF_STRING,MENU_DIALOG0+zz,TEXT("Video Preview Pin..."));
+                AppendMenu(hMenuSub,MF_STRING,MENU_DIALOG0+zz,TEXT("视频预览格式..."));
                 gcap.iVCapPreviewPinDialogPos = zz++;
                 CoTaskMemFree(cauuid.pElems);
             }
@@ -2472,7 +2618,7 @@ void MakeMenuOptions()
                 if(SUCCEEDED(hr) && cauuid.cElems > 0)
                 {
                     AppendMenu(hMenuSub,MF_STRING,MENU_DIALOG0+zz,
-                        TEXT("Video Crossbar..."));
+                        TEXT("视频交叉开关..."));
                     gcap.iVCrossbarDialogPos = zz++;
                     CoTaskMemFree(cauuid.pElems);
                 }
@@ -2489,7 +2635,7 @@ void MakeMenuOptions()
                     hr = pSpec->GetPages(&cauuid);
                     if(SUCCEEDED(hr) && cauuid.cElems > 0)
                     {
-                        AppendMenu(hMenuSub,MF_STRING,MENU_DIALOG0+zz, TEXT("Second Crossbar..."));
+                        AppendMenu(hMenuSub,MF_STRING,MENU_DIALOG0+zz, TEXT("第二个交叉开关..."));
                         gcap.iACrossbarDialogPos = zz++;
                         CoTaskMemFree(cauuid.pElems);
                     }
@@ -2521,7 +2667,7 @@ void MakeMenuOptions()
             hr = pSpec->GetPages(&cauuid);
             if(SUCCEEDED(hr) && cauuid.cElems > 0)
             {
-                AppendMenu(hMenuSub,MF_STRING,MENU_DIALOG0+zz, TEXT("TV Tuner..."));
+                AppendMenu(hMenuSub,MF_STRING,MENU_DIALOG0+zz, TEXT("电视调谐器..."));
                 gcap.iTVTunerDialogPos = zz++;
                 CoTaskMemFree(cauuid.pElems);
             }
@@ -2549,7 +2695,7 @@ void MakeMenuOptions()
             hr = pSpec->GetPages(&cauuid);
             if(SUCCEEDED(hr) && cauuid.cElems > 0)
             {
-                AppendMenu(hMenuSub,MF_STRING,MENU_DIALOG0+zz, TEXT("Audio Capture Pin..."));
+                AppendMenu(hMenuSub,MF_STRING,MENU_DIALOG0+zz, TEXT("音频采集格式..."));
                 gcap.iACapCapturePinDialogPos = zz++;
                 CoTaskMemFree(cauuid.pElems);
             }
@@ -2572,7 +2718,7 @@ void MakeMenuOptions()
             hr = pSpec->GetPages(&cauuid);
             if(SUCCEEDED(hr) && cauuid.cElems > 0)
             {
-                AppendMenu(hMenuSub,MF_STRING,MENU_DIALOG0+zz, TEXT("TV Audio..."));
+                AppendMenu(hMenuSub,MF_STRING,MENU_DIALOG0+zz, TEXT("电视音频..."));
                 gcap.iTVAudioDialogPos = zz++;
                 CoTaskMemFree(cauuid.pElems);
             }
@@ -2608,7 +2754,7 @@ void MakeMenuOptions()
             }
         }
 
-        AppendMenu(hMenuSub, MF_STRING | MF_POPUP, (UINT_PTR)gcap.hMenuPopup, TEXT("Video Input"));
+        AppendMenu(hMenuSub, MF_STRING | MF_POPUP, (UINT_PTR)gcap.hMenuPopup, TEXT("视频输入"));
 
         if(InputToEnable == -1)
         {
@@ -2621,6 +2767,68 @@ void MakeMenuOptions()
     // !!! anything needed to delete the popup when selecting a new input?
 }
 
+
+// Preview renderer statistics are optional; the selected rate is not a measured rate.
+void UpdatePreviewStatus()
+{
+    if(!gcap.pVSC || !gcap.pFg) return;
+    AM_MEDIA_TYPE *type = NULL;
+    if(FAILED(gcap.pVSC->GetFormat(&type)) || !type) return;
+    BITMAPINFOHEADER *bitmap = NULL;
+    LONGLONG interval = 0;
+    if(type->pbFormat && type->formattype == FORMAT_VideoInfo && type->cbFormat >= sizeof(VIDEOINFOHEADER))
+    {
+        VIDEOINFOHEADER *video = (VIDEOINFOHEADER *)type->pbFormat;
+        bitmap = &video->bmiHeader;
+        interval = video->AvgTimePerFrame;
+    }
+    else if(type->pbFormat && type->formattype == FORMAT_VideoInfo2 && type->cbFormat >= sizeof(VIDEOINFOHEADER2))
+    {
+        VIDEOINFOHEADER2 *video = (VIDEOINFOHEADER2 *)type->pbFormat;
+        bitmap = &video->bmiHeader;
+        interval = video->AvgTimePerFrame;
+    }
+    if(!bitmap || bitmap->biWidth <= 0 || bitmap->biHeight == 0 || bitmap->biHeight == LONG_MIN)
+    {
+        DeleteMediaType(type);
+        return;
+    }
+    int width = bitmap->biWidth, height = ABS(bitmap->biHeight);
+    int selectedRate = interval > 0 ? (int)(1000000000. / interval + 0.5) : 0;
+    DeleteMediaType(type);
+
+    int actualRate = 0;
+    IEnumFilters *filters = NULL;
+    if(SUCCEEDED(gcap.pFg->EnumFilters(&filters)) && filters)
+    {
+        IBaseFilter *filter = NULL;
+        while(filters->Next(1, &filter, NULL) == S_OK)
+        {
+            IQualProp *quality = NULL;
+            if(SUCCEEDED(filter->QueryInterface(IID_IQualProp, (void **)&quality)))
+            {
+                if(FAILED(quality->get_AvgFrameRate(&actualRate))) actualRate = 0;
+                quality->Release();
+            }
+            filter->Release();
+            if(actualRate > 0) break;
+        }
+        filters->Release();
+    }
+    TCHAR message[256];
+    if(selectedRate > 0 && actualRate > 0)
+        _sntprintf_s(message, NUMELMS(message), _TRUNCATE,
+            TEXT("预览中 | 采集格式 %d×%d | 设置 %d.%02d 帧/秒 | 实际平均 %d.%02d 帧/秒"),
+            width, height, selectedRate / 100, selectedRate % 100, actualRate / 100, actualRate % 100);
+    else if(selectedRate > 0)
+        _sntprintf_s(message, NUMELMS(message), _TRUNCATE,
+            TEXT("预览中 | 采集格式 %d×%d | 设置 %d.%02d 帧/秒 | 实际帧率不可用"),
+            width, height, selectedRate / 100, selectedRate % 100);
+    else
+        _sntprintf_s(message, NUMELMS(message), _TRUNCATE,
+            TEXT("预览中 | 采集格式 %d×%d | 帧率不可用"), width, height);
+    statusUpdateStatus(ghwndStatus, message);
+}
 
 // how many captured/dropped so far
 //
@@ -2647,7 +2855,7 @@ void UpdateStatus(BOOL fAllStats)
     // this filter can't tell us dropped frame info.
     if(!gcap.pDF)
     {
-        statusUpdateStatus(ghwndStatus, TEXT("Filter cannot report capture information"));
+        statusUpdateStatus(ghwndStatus, TEXT("设备无法提供采集统计信息"));
         return;
     }
 
@@ -2663,7 +2871,7 @@ void UpdateStatus(BOOL fAllStats)
     if(!fAllStats)
     {
         LONG lTime = timeGetTime() - gcap.lCapStartTime;
-        wsprintf(tach, TEXT("Captured %d frames (%d dropped) %d.%dsec\0"), lNot,
+        wsprintf(tach, TEXT("已采集 %d 帧（丢失 %d 帧），%d.%d 秒\0"), lNot,
                  lDropped, lTime / 1000, 
                  lTime / 100 - lTime / 1000 * 10);
         statusUpdateStatus(ghwndStatus, tach);
@@ -2699,7 +2907,7 @@ void UpdateStatus(BOOL fAllStats)
         lData = 0;
     }
 
-    wsprintf(tach, TEXT("Captured %d frames in %d.%d sec (%d dropped): %d.%d fps %d.%d Meg/sec\0"),
+    wsprintf(tach, TEXT("已采集 %d 帧，用时 %d.%d 秒（丢失 %d 帧）：%d.%d 帧/秒，%d.%d MB/秒\0"),
              lNot, lDurMS / 1000, lDurMS / 100 - lDurMS / 1000 * 10,
              lDropped, (int)flFrame,
              (int)(flFrame * 10.) - (int)flFrame * 10,
@@ -2893,7 +3101,7 @@ void AddDevicesToMenu()
     int iMenuItems = GetMenuItemCount(hMenuSub);
     if(iMenuItems == -1)
     {
-        ErrMsg(TEXT("Error Cleaning Devices Menu"));
+        ErrMsg(TEXT("无法清理设备菜单"));
         return;
     }
     else if(iMenuItems > 0)
@@ -2919,7 +3127,7 @@ void AddDevicesToMenu()
                           IID_ICreateDevEnum, (void**)&pCreateDevEnum);
     if(hr != NOERROR)
     {
-        ErrMsg(TEXT("Error Creating Device Enumerator"));
+        ErrMsg(TEXT("无法创建设备枚举器"));
         return;
     }
 
@@ -2927,8 +3135,8 @@ void AddDevicesToMenu()
     hr = pCreateDevEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &pEm, 0);
     if(hr != NOERROR)
     {
-        ErrMsg(TEXT("Sorry, you have no video capture hardware.\r\n\r\n")
-               TEXT("Video capture will not function properly."));
+        ErrMsg(TEXT("未找到视频采集设备。\r\n\r\n")
+               TEXT("视频采集功能无法正常使用。"));
         goto EnumAudio;
     }
 
@@ -3070,14 +3278,14 @@ void ChooseFrameRate()
 
                     hr = gcap.pVSC->SetFormat(pmt);
                     if(hr != S_OK)
-                        ErrMsg(TEXT("%x: Cannot set new frame rate"), hr);
+                        ErrMsg(TEXT("%x：无法设置新的帧率"), hr);
                 }
                 DeleteMediaType(pmt);
             }
         }
 
         if(hr != NOERROR)
-            ErrMsg(TEXT("Cannot set frame rate for capture"));
+            ErrMsg(TEXT("无法设置采集帧率"));
 
         if(gcap.fWantPreview)  // we were previewing
             StartPreview();
@@ -3259,7 +3467,7 @@ LONG PASCAL AppCommand(HWND hwnd, unsigned msg, WPARAM wParam, LPARAM lParam)
             {
                 hr = gcap.pConfigAviMux->SetMasterStream(gcap.iMasterStream);
                 if(hr != NOERROR)
-                    ErrMsg(TEXT("SetMasterStream failed!"));
+                    ErrMsg(TEXT("设置主同步流失败！"));
             }
             break;
 
@@ -3269,7 +3477,7 @@ LONG PASCAL AppCommand(HWND hwnd, unsigned msg, WPARAM wParam, LPARAM lParam)
             {
                 hr = gcap.pConfigAviMux->SetMasterStream(gcap.iMasterStream);
                 if(hr != NOERROR)
-                    ErrMsg(TEXT("SetMasterStream failed!"));
+                    ErrMsg(TEXT("设置主同步流失败！"));
             }
             break;
 
@@ -3279,7 +3487,7 @@ LONG PASCAL AppCommand(HWND hwnd, unsigned msg, WPARAM wParam, LPARAM lParam)
             {
                 hr = gcap.pConfigAviMux->SetMasterStream(gcap.iMasterStream);
                 if(hr != NOERROR)
-                    ErrMsg(TEXT("SetMasterStream failed!"));
+                    ErrMsg(TEXT("设置主同步流失败！"));
             }
             break;
 
@@ -3879,8 +4087,8 @@ BOOL AllocCaptureFile(HWND hWnd)
         if(gcap.pBuilder->AllocCapFile(T2W(gcap.szCaptureFile),
             (DWORDLONG)gcap.wCapFileSize * 1024L * 1024L) != NOERROR)
         {
-            MessageBox(ghwndApp, TEXT("Error"),
-                       TEXT("Failed to pre-allocate capture file space"),
+            MessageBox(ghwndApp, TEXT("错误"),
+                       TEXT("无法预分配采集文件空间"),
                        MB_OK | MB_ICONEXCLAMATION);
             return FALSE;
         }
@@ -3931,7 +4139,7 @@ BOOL OpenFileDialog(HWND hWnd, LPTSTR pszName, int cb)
     ofn.lpstrFile     = szFileName;
     ofn.nMaxFile      = sizeof(szFileName) ;
     ofn.lpstrFileTitle = NULL;
-    ofn.lpstrTitle    = TEXT("Set Capture File");
+    ofn.lpstrTitle    = TEXT("设置采集文件");
     ofn.nMaxFileTitle = 0 ;
     ofn.lpstrInitialDir = szBuffer;
     ofn.Flags = OFN_HIDEREADONLY | OFN_NOREADONLYRETURN | OFN_PATHMUSTEXIST ;
@@ -4014,7 +4222,7 @@ BOOL SaveCaptureFile(HWND hWnd)
     if(OpenFileDialog(hWnd, tachDstFile, _MAX_PATH))
     {
         // We have a capture file name
-        statusUpdateStatus(ghwndStatus, TEXT("Saving capture file - please wait..."));
+        statusUpdateStatus(ghwndStatus, TEXT("正在保存采集文件，请稍候..."));
 
         // we need our own graph builder because the main one might not exist
         ICaptureGraphBuilder2 *pBuilder;
@@ -4042,11 +4250,11 @@ BOOL SaveCaptureFile(HWND hWnd)
         }
 
         if(hr == S_OK)
-            statusUpdateStatus(ghwndStatus, TEXT("Capture file saved"));
+            statusUpdateStatus(ghwndStatus, TEXT("采集文件已保存"));
         else if(hr == S_FALSE)
-            statusUpdateStatus(ghwndStatus, TEXT("Capture file save aborted"));
+            statusUpdateStatus(ghwndStatus, TEXT("已取消保存采集文件"));
         else
-            statusUpdateStatus(ghwndStatus, TEXT("Capture file save ERROR"));
+            statusUpdateStatus(ghwndStatus, TEXT("保存采集文件失败"));
 
         return (hr == NOERROR ? TRUE : FALSE); 
     }
@@ -4370,7 +4578,7 @@ int FAR PASCAL FrameRateProc(HWND hwnd, UINT msg, UINT wParam, LONG lParam)
 
                 if(frameRate <= 0.)
                 {
-                    ErrMsg(TEXT("Invalid frame rate."));
+                    ErrMsg(TEXT("帧率无效。"));
                     break;
                 }
                 else
@@ -4490,23 +4698,30 @@ DWORDLONG GetSize(LPCTSTR tach)
 
 void ReadVideoPin()
 {
-	// read video pin settings
-	HRESULT hr=S_OK;
-	AM_MEDIA_TYPE *pmt;
-	hr = gcap.pVSC->GetFormat(&pmt);
-
-    // DV capture does not use a VIDEOINFOHEADER
-    if(hr == NOERROR)
+    if(!gcap.pVSC) return;
+    AM_MEDIA_TYPE *pmt = NULL;
+    if(FAILED(gcap.pVSC->GetFormat(&pmt)) || !pmt) return;
+    if(pmt->pbFormat && pmt->formattype == FORMAT_VideoInfo &&
+       pmt->cbFormat >= sizeof(VIDEOINFOHEADER))
     {
-        if(pmt->formattype == FORMAT_VideoInfo)
-        {
-            VIDEOINFOHEADER *pvi = (VIDEOINFOHEADER *)pmt->pbFormat;
-			gcap.FrameRate = (LONGLONG)(10000000 / pvi->AvgTimePerFrame);
-			gcap.CaptureWidth = pvi->bmiHeader.biWidth;
-			gcap.CaptureHeight = pvi->bmiHeader.biHeight;
-        }
+        VIDEOINFOHEADER *pvi = (VIDEOINFOHEADER *)pmt->pbFormat;
+        if(pvi->AvgTimePerFrame > 0)
+            gcap.FrameRate = 10000000. / pvi->AvgTimePerFrame;
+        gcap.CaptureWidth = pvi->bmiHeader.biWidth;
+        if(pvi->bmiHeader.biHeight != LONG_MIN)
+            gcap.CaptureHeight = ABS(pvi->bmiHeader.biHeight);
     }
-	DeleteMediaType(pmt);
+    else if(pmt->pbFormat && pmt->formattype == FORMAT_VideoInfo2 &&
+            pmt->cbFormat >= sizeof(VIDEOINFOHEADER2))
+    {
+        VIDEOINFOHEADER2 *pvi = (VIDEOINFOHEADER2 *)pmt->pbFormat;
+        if(pvi->AvgTimePerFrame > 0)
+            gcap.FrameRate = 10000000. / pvi->AvgTimePerFrame;
+        gcap.CaptureWidth = pvi->bmiHeader.biWidth;
+        if(pvi->bmiHeader.biHeight != LONG_MIN)
+            gcap.CaptureHeight = ABS(pvi->bmiHeader.biHeight);
+    }
+    DeleteMediaType(pmt);
 }
 
 void OnClose()
@@ -4531,11 +4746,11 @@ void OnClose()
     FreeCapFilters();
 
     //
-    // Store current settings in win.ini for next time
+    // Store current settings in amcap.ini for next time
     //
 
     // Save the name of the current capture file
-    WriteProfileString(TEXT("annie"), TEXT("CaptureFile"), gcap.szCaptureFile);
+    WriteAppProfileString(TEXT("annie"), TEXT("CaptureFile"), gcap.szCaptureFile);
 
     wszDisplayName = 0;
     szBuf[0] = NULL;
@@ -4554,7 +4769,7 @@ void OnClose()
     }
 
     // Save the current video device string
-    WriteProfileString(TEXT("annie"), TEXT("VideoDevice2"), szBuf);
+    WriteAppProfileString(TEXT("annie"), TEXT("VideoDevice2"), szBuf);
 
     wszDisplayName = 0;
     szBuf[0] = NULL;
@@ -4573,38 +4788,38 @@ void OnClose()
     }
 
     // Save the current audio device string
-    WriteProfileString(TEXT("annie"), TEXT("AudioDevice2"), szBuf);
+    WriteAppProfileString(TEXT("annie"), TEXT("AudioDevice2"), szBuf);
 
     // Save the integer settings
     wsprintf(szBuf, TEXT("%d"), (int)(10000000 / gcap.FrameRate));
-    WriteProfileString(TEXT("annie"), TEXT("FrameRate"), szBuf);
+    WriteAppProfileString(TEXT("annie"), TEXT("FrameRate"), szBuf);
 
 	wsprintf(szBuf, TEXT("%d"), gcap.CaptureWidth);
-	WriteProfileString(TEXT("annie"), TEXT("CaptureWidth"), szBuf);
+	WriteAppProfileString(TEXT("annie"), TEXT("CaptureWidth"), szBuf);
 
 	wsprintf(szBuf, TEXT("%d"), gcap.CaptureHeight);
-	WriteProfileString(TEXT("annie"), TEXT("CaptureHeight"), szBuf);
+	WriteAppProfileString(TEXT("annie"), TEXT("CaptureHeight"), szBuf);
 
     wsprintf(szBuf, TEXT("%d"), gcap.fUseFrameRate);
-    WriteProfileString(TEXT("annie"), TEXT("UseFrameRate"), szBuf);
+    WriteAppProfileString(TEXT("annie"), TEXT("UseFrameRate"), szBuf);
 
     wsprintf(szBuf, TEXT("%d"), gcap.fCapAudio);
-    WriteProfileString(TEXT("annie"), TEXT("CaptureAudio"), szBuf);
+    WriteAppProfileString(TEXT("annie"), TEXT("CaptureAudio"), szBuf);
 
     wsprintf(szBuf, TEXT("%d"), gcap.fCapCC);
-    WriteProfileString(TEXT("annie"), TEXT("CaptureCC"), szBuf);
+    WriteAppProfileString(TEXT("annie"), TEXT("CaptureCC"), szBuf);
 
     wsprintf(szBuf, TEXT("%d"), gcap.fWantPreview);
-    WriteProfileString(TEXT("annie"), TEXT("WantPreview"), szBuf);
+    WriteAppProfileString(TEXT("annie"), TEXT("WantPreview"), szBuf);
 
     wsprintf(szBuf, TEXT("%d"), gcap.iMasterStream);
-    WriteProfileString(TEXT("annie"), TEXT("MasterStream"), szBuf);
+    WriteAppProfileString(TEXT("annie"), TEXT("MasterStream"), szBuf);
 
     wsprintf(szBuf, TEXT("%d"), gcap.fUseTimeLimit);
-    WriteProfileString(TEXT("annie"), TEXT("UseTimeLimit"), szBuf);
+    WriteAppProfileString(TEXT("annie"), TEXT("UseTimeLimit"), szBuf);
 
     wsprintf(szBuf, TEXT("%d"), gcap.dwTimeLimit);
-    WriteProfileString(TEXT("annie"), TEXT("TimeLimit"), szBuf);
+    WriteAppProfileString(TEXT("annie"), TEXT("TimeLimit"), szBuf);
 }
 
 

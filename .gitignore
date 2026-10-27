@@ -1,0 +1,85 @@
+# Local / Editor / OS
+.agents/
+.zcode/
+.codex/
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+Thumbs.db
+desktop.ini
+*.log
+*.tmp
+*.bak
+*.orig
+
+# Build
+_build/
+_build[0-9._-]*/
+_install/
+_install[0-9._-]*/
+build/
+build[0-9._-]*/
+install/
+install[0-9._-]*/
+_log/
+_log[0-9._-]*/
+temp/
+temp[0-9._-]*/
+_temp/
+_temp[0-9._-]*/
+
+# Python
+**/__pycache__/
+*.py[cod]
+
+# C/C++ 中间产物（注意：若项目提交预编译库如 cmake_third，勿加 *.a/*.lib/*.so 等）
+*.o
+*.obj
+
+# Android（Gradle）
+.gradle/
+local.properties
+.cxx/
+captures/
+*.apk
+*.aab
+
+# iOS / macOS（Xcode）
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.ipa
+Pods/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+x64/
+x86/
+
+# Qt
+*.pro.user
+
+# MCU / 嵌入式 IDE
+# Keil: *.uvguix.*  Listings/  Objects/
+# IAR: Debug/  Release/  Settings/  *.dep
+# STM32CubeIDE: Debug/  Release/  .settings/
+# CubeMX 生成工程同时含 MDK-ARM/ 目录时按上述 Keil 规则处理
+
+# Node / 前端
+node_modules/
+dist/

@@ -1,0 +1,21 @@
+# CamView 开发注意事项
+
+- 需求：C++ 跨平台 UVC 摄像头程序；不使用 Qt 或 wxWidgets。界面使用 Dear ImGui，可选 OpenCV／Windows MF 采集；Windows CamView Release `/MD` 及匹配的 OpenCV 动态库。
+- ImGui `v1.91.9b-docking` 必需源码保存在 `third_party/imgui`，保持上游原样。启用多视口，不启用停靠；`ConfigViewportsNoAutoMerge` 保证参数是独立系统窗口，主界面固定到主视口。GLFW 3.4 通过 FetchContent 固定源码 ZIP 和 SHA-256，在 `_build/_deps/` 静态构建；使用 OpenGL3 渲染。来源见 `third_party/README.md`。
+- 不再使用或查找 wxWidgets；旧 `_build` 下的源码／产物和 CMake 缓存保留即可，不要为清理旧依赖删除用户构建或安装目录。
+- CamView 使用 `camview/third_party/opencv` 下官方 Windows x64 OpenCV 4.6.0 Release 动态库及 `/MD`；不再使用 cmake_third，移除了 Debug 库。Linux 和 macOS 暂无预编译动态包，尚未验证。
+- `camview/src/camera.h` 为设备／格式／控制模型与采集接口；`camera.cpp` 为后台采集线程和 OpenCV 后端；`platform.cpp` 为 Windows DirectShow 与 Linux V4L2 枚举／控制；`media_foundation.cpp` 为原生 MF；`macos.mm` 为 macOS 枚举；`main.cpp` 为 ImGui 界面、OpenGL 纹理、窗口生命周期及拍照保存。
+- 保持采集核心与 UI 分离。COM 对象在各自线程作用域内创建和释放；采集及参数读写在同一工作线程执行。发布的图像通过互斥锁和不可修改的 Mat 快照交给 UI。不要在工作线程调用 ImGui 或 OpenGL。
+- 参数范围、步长、默认数值、当前数值及自动模式来自驱动。默认按钮恢复默认数值并保留当前自动／手动模式，不能伪称完整恢复出厂设置。
+- 界面约定：左上角透明背景、白字黑色轮廓，无底框；摄像头只显示名称，设备／后端／格式与操作按钮在同一行，设备／格式宽度固定 170／260；正常预览状态仅显示“预览中”；点击“参数”打开独立系统窗口，包含 ProCamp 和 Camera Control 标签页，可独立移动、缩放和关闭，主预览不缩小。
+- 拍照直接保存至进程当前工作目录，命名 `capture_YYYYMMDD_HHMMSS_mmm.png`，同名追加序号，原子独占创建保证不覆盖，不弹保存窗口；Windows 使用宽字符路径。关闭主窗口需先停止采集，在主 GL 上下文有效时释放纹理，再销毁 ImGui／GLFW 资源。
+- 中文字体从系统读取：Windows 优先微软雅黑，macOS 优先苹方，Linux 优先 Noto CJK／文泉驿。未找到时使用 ImGui 默认字体并输出提示；不擅自下载或安装系统字体。
+- 验证：VS 2019 配置／生成、Windows 应用源码和 ImGui 核心／后端 MSVC `/Zs` 检查通过；Linux UI 源码以下载的 GLFW3.4 和 cmake_third 通用头文件执行 `-fsyntax-only` 通过。目前生成项目中应用、ImGui、GLFW Release 运行库均为 MultiThreadedDLL（`/MD`），当前 solution／应用工程无 wxWidgets 依赖。
+- 用户反馈迁移前 wxWidgets 版本可使用；ImGui 主应用未执行完整编译、链接或 GUI 实测，不能将原版本反馈当成本次验证。Windows 采集核心已用实际 Owl3D Shift 摄像头测试；打开后设置手动曝光 -7 时，MF/NV12 1080p60 约 59.95 FPS，OpenCV/MJPG 约 59.98 FPS，旧帧快照不被后续采集改写。测试已恢复原曝光值及自动模式。macOS 尚未验证，通用 UVC 控制未实现。枚举／停止同步采集可能阻塞 UI，仍需改进。
+- 完整编译需要用户明确要求。`camview/build.py` 和 `amcap/build.py` 是各自的桌面构建脚本，按其配置／构建／安装；日志分别在各自项目的 `_temp/build.log`，不要删除旧的根目录 `build.log`。详细配置和限制见 `docs/build.md`。
+- 初始目录不是 Git 仓库，不擅自初始化或提交。跨项目临时验证输出在工作区 `_temp/`；各项目构建／安装／脚本日志分别在各自目录下的 `_build/`、`_install/`、`_temp/`。不修改第三方源码或预编译库来绕过兼容问题。
+- Windows OpenCV 枚举走 DirectShow 的 IAMStreamConfig／IAMVideoControl，MF 走原生 MF；OpenCV 4.6 DirectShow 不支持 NV12 选择，列表滤除，NV12 使用 MF。设置顺序须为 FPS → 分辨率 → FourCC，FPS 放最后会重建图并丢掉像素格式；必须校验 FourCC 读回。OpenCV FPS 属性只是请求值，不能当实际帧率。
+- Windows OpenCV 线程使用 STA，匹配上游内部 CoInitialize；MF 使用 MTA。Windows 两个采集后端输出每次新建 Mat，发布时移动引用；Linux/macOS 仍复制。每秒追加 `_temp/capture-metrics.csv` 统计读／转／发布／参数耗时与收到的 FPS、MF 时间戳节奏，诊断不能阻止采集，日志不包含图像。
+- CamView 安装到 `camview/_install/` 根目录，AMCap 安装到 `amcap/_install/` 根目录：可执行文件／应用包与相关许可证平铺，不使用 bin／share 子目录。不擅自删除旧安装目录中的遗留文件。
+- `amcap/` 是用户另行下载的独立 Git 仓库，使用 Windows DirectShow，不是 MF；新增 `amcap/CMakeLists.txt` 独立于 CamView。原工程 Win32；用户已明确同意修复 `BaseClasses/ctlutil.h:278` 的一处声明，完整 `/MT` 构建及安装通过。原 bat 已按要求删除，使用 `amcap/build.py`，VS 生成器显式选择 Win32；其他第三方源码修改仍须用户明确同意。用户报告直接打开出错，启动格式现从设备支持列表匹配，GUI 和摄像头仍待实测，见 `docs/amcap.md`。
+- AMCap 的 [annie] 配置使用可执行文件同目录的 amcap.ini，保存失败会提示；不自动迁移旧 win.ini。此修改仅通过 MSVC /Zs，尚未重新编译或实测。
