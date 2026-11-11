@@ -65,6 +65,50 @@ PRegisterDeviceNotification gpRegisterDeviceNotification=0;
 DWORD g_dwGraphRegister=0;
 CString gszSettingsPath;
 
+static CString DeviceMenuName(IMoniker *moniker, IPropertyBag *bag, BSTR name)
+{
+    CString result(name);
+    CStringW path;
+    VARIANT value;
+    VariantInit(&value);
+    if(SUCCEEDED(bag->Read(L"DevicePath", &value, NULL)) && value.vt == VT_BSTR && value.bstrVal)
+        path = value.bstrVal;
+    VariantClear(&value);
+
+    if(path.IsEmpty())
+    {
+        LPOLESTR displayName = NULL;
+        if(SUCCEEDED(moniker->GetDisplayName(NULL, NULL, &displayName)) && displayName)
+        {
+            path = displayName;
+            CoTaskMemFree(displayName);
+        }
+    }
+
+    path.MakeLower();
+    int vid = path.Find(L"vid_");
+    int pid = path.Find(L"pid_");
+    if(vid >= 0 && pid >= 0 && vid + 8 <= path.GetLength() && pid + 8 <= path.GetLength())
+    {
+        CStringW vendor = path.Mid(vid + 4, 4);
+        CStringW product = path.Mid(pid + 4, 4);
+        if(vendor.SpanIncluding(L"0123456789abcdef").GetLength() == 4 &&
+           product.SpanIncluding(L"0123456789abcdef").GetLength() == 4 &&
+           (vid + 8 == path.GetLength() || wcschr(L"0123456789abcdef", path[vid + 8]) == NULL) &&
+           (pid + 8 == path.GetLength() || wcschr(L"0123456789abcdef", path[pid + 8]) == NULL))
+        {
+            vendor.MakeUpper();
+            product.MakeUpper();
+            result += TEXT(" (");
+            result += CString(vendor);
+            result += TEXT(":");
+            result += CString(product);
+            result += TEXT(")");
+        }
+    }
+    return result;
+}
+
 static UINT GetAppProfileInt(LPCTSTR section, LPCTSTR key, INT defaultValue)
 {
     return GetPrivateProfileInt(section, key, defaultValue, gszSettingsPath);
@@ -3165,7 +3209,7 @@ void AddDevicesToMenu()
             if(hr == NOERROR)
             {
                 AppendMenu(hMenuSub, MF_STRING, MENU_VDEVICE0 + uIndex,
-                    W2T(var.bstrVal));
+                    DeviceMenuName(pM, pBag, var.bstrVal));
 
                 if(gcap.pmVideo != 0 && (S_OK == gcap.pmVideo->IsEqual(pM)))
                     bCheck = TRUE;
@@ -3221,7 +3265,7 @@ EnumAudio:
             if(hr == NOERROR)
             {
                 AppendMenu(hMenuSub, MF_STRING, MENU_ADEVICE0 + uIndex,
-                    W2T(var.bstrVal));
+                    DeviceMenuName(pM, pBag, var.bstrVal));
 
                 if(gcap.pmAudio != 0 && (S_OK == gcap.pmAudio->IsEqual(pM)))
                     bCheck = TRUE;
