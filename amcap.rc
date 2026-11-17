@@ -50,6 +50,8 @@ BEGIN
         END
     POPUP "采集(&C)"
         BEGIN
+            MENUITEM "截图"                     , MENU_SNAPSHOT
+            MENUITEM SEPARATOR
             MENUITEM "开始采集(&S)"       , MENU_START_CAP
             MENUITEM "停止采集(&P)"        , MENU_STOP_CAP
             MENUITEM SEPARATOR

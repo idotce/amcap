@@ -27,3 +27,5 @@ C:\cmake\bin\cmake.exe --install amcap/_build --config Release --prefix amcap/_i
 当前源码的 AMCap 菜单、对话框及提示已翻译为简体中文；预览状态每秒显示采集分辨率、设置帧率和 IQualProp 实际平均渲染帧率（不可用时明示），录像时保留采集统计。驱动属性页和设备名称由驱动决定。Windows MSVC /Zs 和资源编译通过；完整构建及 GUI／摄像头实测待完成。
 
 预览显示宽度限制为当前显示器逻辑宽度的 3/4，高度按画面比例缩放并居中，不限制实际采集分辨率；Win32 MSVC 语法与缩放计算轻量测试通过，GUI 和摄像头仍待实测。
+
+采集菜单第一项为“截图”，预览或采集时把当前画面保存到当前工作目录，命名 `capture_YYYYMMDD_HHMMSS.bmp`，重名追加序号；使用 `IBasicVideo::GetCurrentImage` 获取画面并写成 BMP。普通预览优先使用支持运行中取帧的 Video Mixing Renderer；不可用时回退默认渲染器，并仅在非录像时尝试暂停取图。此次修改尚未编译或进行 GUI 和摄像头实测。

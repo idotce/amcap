@@ -169,6 +169,7 @@ struct _capstuff
 	int CaptureWidth;
 	int CaptureHeight;
     BOOL fWantPreview;
+    BOOL fCaptureFileSetByUser;
     long lCapStartTime;
     long lCapStopTime;
     WCHAR wachFriendlyName[120];
@@ -256,6 +257,8 @@ void ErrMsg(LPTSTR sz,...);
 BOOL SetCaptureFile(HWND hWnd);
 BOOL SaveCaptureFile(HWND hWnd);
 BOOL AllocCaptureFile(HWND hWnd);
+BOOL SaveSnapshot(HWND hWnd);
+void MakeDefaultCaptureFileName(LPTSTR pszName, int cch, LPCTSTR pszExt);
 
 int DoDialog(HWND hwndParent, int DialogID, DLGPROC fnDialog, long lParam);
 int FAR PASCAL AllocCapFileProc(HWND hDlg, UINT Message, UINT wParam, LONG lParam);
@@ -446,6 +449,7 @@ BOOL AppInit(HINSTANCE hInst, HINSTANCE hPrev, int sw)
     GetAppProfileString(TEXT("annie"), TEXT("CaptureFile"), TEXT(""),
         gcap.szCaptureFile,
         NUMELMS(gcap.szCaptureFile));
+    gcap.fCaptureFileSetByUser = FALSE;
 
     // Read the list of devices to use from amcap.ini
     ZeroMemory(gcap.rgpmAudioMenu, sizeof(gcap.rgpmAudioMenu));
@@ -727,6 +731,10 @@ LONG WINAPI  AppWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
             // can toggle preview if not capturing
             EnableMenuItem((HMENU)wParam, MENU_PREVIEW,
                 !gcap.fCapturing ? MF_ENABLED : MF_GRAYED);
+
+            // can save a snapshot while previewing or capturing
+            EnableMenuItem((HMENU)wParam, MENU_SNAPSHOT,
+                (gcap.fPreviewing || gcap.fCapturing) ? MF_ENABLED : MF_GRAYED);
 
             // MPEG2 enabled ?
             CheckMenuItem((HMENU)wParam, MENU_MPEG2, 
@@ -1699,6 +1707,17 @@ void FreeCapFilters()
 }
 
 
+// Use the Video Mixing Renderer so still images can be read while running.
+static CComPtr<IBaseFilter> CreatePreviewRenderer()
+{
+    CComPtr<IBaseFilter> renderer;
+    if(SUCCEEDED(renderer.CoCreateInstance(CLSID_VideoMixingRenderer)) &&
+       FAILED(gcap.pFg->AddFilter(renderer, L"Preview Renderer")))
+        renderer.Release();
+    return renderer;
+}
+
+
 // build the capture graph
 //
 BOOL BuildCaptureGraph()
@@ -1706,7 +1725,6 @@ BOOL BuildCaptureGraph()
     USES_CONVERSION;
     int cy, cyBorder;
     HRESULT hr;
-    BOOL f;
     AM_MEDIA_TYPE *pmt=0;
 
     // we have one already
@@ -1723,12 +1741,11 @@ BOOL BuildCaptureGraph()
     if(gcap.pACap == NULL && gcap.fCapAudio)
         return FALSE;
 
-    // no capture file name yet... we need one first
+    // no capture file name yet... generate one in the current directory
     if(gcap.szCaptureFile[0] == 0)
     {
-        f = SetCaptureFile(ghwndApp);
-        if(!f)
-            return f;
+        MakeDefaultCaptureFileName(gcap.szCaptureFile,
+            NUMELMS(gcap.szCaptureFile), TEXT(".avi"));
     }
 
     // we already have another graph built... tear down the old one
@@ -1813,8 +1830,9 @@ BOOL BuildCaptureGraph()
 
         if(gcap.fWantPreview)
         {
+            CComPtr<IBaseFilter> renderer = CreatePreviewRenderer();
             hr = gcap.pBuilder->RenderStream(&PIN_CATEGORY_PREVIEW, &MEDIATYPE_Interleaved, 
-                                            gcap.pVCap, NULL, NULL);
+                                            gcap.pVCap, NULL, renderer);
             if(hr == VFW_S_NOPREVIEWPIN)
             {
                 // preview was faked up for us using the (only) capture pin
@@ -1823,7 +1841,7 @@ BOOL BuildCaptureGraph()
             else if(hr != S_OK)
             {
                 hr = gcap.pBuilder->RenderStream(&PIN_CATEGORY_PREVIEW, &MEDIATYPE_Video, 
-                                                 gcap.pVCap, NULL, NULL);
+                                                 gcap.pVCap, NULL, renderer);
                 if(hr == VFW_S_NOPREVIEWPIN)
                 {
                     // preview was faked up for us using the (only) capture pin
@@ -2044,8 +2062,9 @@ BOOL BuildPreviewGraph()
     }
     else
     {
+        CComPtr<IBaseFilter> renderer = CreatePreviewRenderer();
         hr = gcap.pBuilder->RenderStream(&PIN_CATEGORY_PREVIEW,
-                                         &MEDIATYPE_Interleaved, gcap.pVCap, NULL, NULL);
+                                         &MEDIATYPE_Interleaved, gcap.pVCap, NULL, renderer);
         if(hr == VFW_S_NOPREVIEWPIN)
         {
             // preview was faked up for us using the (only) capture pin
@@ -2055,7 +2074,7 @@ BOOL BuildPreviewGraph()
         {
             // maybe it's DV?
             hr = gcap.pBuilder->RenderStream(&PIN_CATEGORY_PREVIEW,
-                                             &MEDIATYPE_Video, gcap.pVCap, NULL, NULL);
+                                             &MEDIATYPE_Video, gcap.pVCap, NULL, renderer);
             if(hr == VFW_S_NOPREVIEWPIN)
             {
                 // preview was faked up for us using the (only) capture pin
@@ -3456,6 +3475,12 @@ LONG PASCAL AppCommand(HWND hwnd, unsigned msg, WPARAM wParam, LPARAM lParam)
             SaveCaptureFile(hwnd);
             break;
 
+        // save the current frame as a bitmap
+        //
+        case MENU_SNAPSHOT:
+            SaveSnapshot(hwnd);
+            break;
+
         // start capturing
         //
         case MENU_START_CAP:
@@ -3464,8 +3489,23 @@ LONG PASCAL AppCommand(HWND hwnd, unsigned msg, WPARAM wParam, LPARAM lParam)
             if(gcap.fPreviewGraphBuilt)
                 TearDownGraph();
 
-            BuildCaptureGraph();
-            StartCapture();
+            // 每次开始采集都使用当前日期时间命名；手动设置的名称只用一次
+            if(!gcap.fCaptureFileSetByUser || gcap.szCaptureFile[0] == 0)
+            {
+                MakeDefaultCaptureFileName(gcap.szCaptureFile,
+                    NUMELMS(gcap.szCaptureFile), TEXT(".avi"));
+                SetAppCaption();
+            }
+            gcap.fCaptureFileSetByUser = FALSE;
+
+            if(BuildCaptureGraph())
+                StartCapture();
+
+            if(!gcap.fCapturing && !gcap.fPreviewing && gcap.fWantPreview)
+            {
+                BuildPreviewGraph();
+                StartPreview();
+            }
             break;
 
         case MENU_MPEG2:
@@ -4210,6 +4250,215 @@ BOOL OpenFileDialog(HWND hWnd, LPTSTR pszName, int cb)
 
 
 /*
+ * Generate a capture file name in the current directory based on the
+ * current local date and time, appending a sequence number if necessary.
+ */
+void MakeDefaultCaptureFileName(LPTSTR pszName, int cch, LPCTSTR pszExt)
+{
+    TCHAR szDir[_MAX_PATH];
+    CString szName;
+    CString szPath;
+    SYSTEMTIME st;
+    DWORD dwDirLen;
+    int seq = 0;
+
+    if(pszName == NULL || cch <= 0)
+        return;
+    if(pszExt == NULL)
+        pszExt = TEXT("");
+
+    dwDirLen = GetCurrentDirectory(NUMELMS(szDir), szDir);
+    if(dwDirLen == 0 || dwDirLen >= NUMELMS(szDir))
+        szDir[0] = TEXT('\0');
+
+    GetLocalTime(&st);
+    for(;;)
+    {
+        if(seq == 0)
+            szName.Format(TEXT("capture_%04d%02d%02d_%02d%02d%02d%s"),
+                          st.wYear, st.wMonth, st.wDay,
+                          st.wHour, st.wMinute, st.wSecond, pszExt);
+        else
+            szName.Format(TEXT("capture_%04d%02d%02d_%02d%02d%02d_%02d%s"),
+                          st.wYear, st.wMonth, st.wDay,
+                          st.wHour, st.wMinute, st.wSecond, seq, pszExt);
+
+        if(szDir[0])
+            szPath.Format(TEXT("%s\\%s"), szDir, (LPCTSTR)szName);
+        else
+            szPath = szName;
+
+        lstrcpyn(pszName, szPath, cch);
+        if(GetFileAttributes(pszName) == INVALID_FILE_ATTRIBUTES)
+            break;
+        seq++;
+    }
+}
+
+
+/*
+ * Write a packed device-independent bitmap to a .bmp file.
+ */
+static BOOL WriteDibToBmp(LPCTSTR pszFile, const BYTE *pDIB, DWORD cbDIB)
+{
+    if(pDIB == NULL || cbDIB < sizeof(BITMAPINFOHEADER))
+        return FALSE;
+
+    const BITMAPINFOHEADER *pbi = (const BITMAPINFOHEADER *)pDIB;
+    if(pbi->biSize < sizeof(BITMAPINFOHEADER) || pbi->biSize > cbDIB)
+        return FALSE;
+
+    DWORD cbPalette = 0;
+    if(pbi->biBitCount <= 8)
+    {
+        DWORD nColors = pbi->biClrUsed ? pbi->biClrUsed :
+                                        (1u << pbi->biBitCount);
+        cbPalette = nColors * sizeof(RGBQUAD);
+    }
+    else if(pbi->biCompression == BI_BITFIELDS &&
+            pbi->biSize == sizeof(BITMAPINFOHEADER))
+    {
+        cbPalette = 3 * sizeof(DWORD);
+    }
+
+    DWORD cbHeader = pbi->biSize + cbPalette;
+    if(cbHeader > cbDIB)
+        return FALSE;
+
+    BITMAPFILEHEADER bfh;
+    ZeroMemory(&bfh, sizeof(bfh));
+    bfh.bfType = 0x4D42;  // 'BM'
+    bfh.bfSize = sizeof(BITMAPFILEHEADER) + cbDIB;
+    bfh.bfOffBits = sizeof(BITMAPFILEHEADER) + cbHeader;
+
+    HANDLE hFile = CreateFile(pszFile, GENERIC_WRITE, 0, NULL,
+                              CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    if(hFile == INVALID_HANDLE_VALUE)
+        return FALSE;
+
+    DWORD cbWritten = 0;
+    BOOL ok = WriteFile(hFile, &bfh, sizeof(bfh), &cbWritten, NULL) &&
+              cbWritten == sizeof(bfh);
+    if(ok)
+    {
+        ok = WriteFile(hFile, pDIB, cbDIB, &cbWritten, NULL) &&
+             cbWritten == cbDIB;
+    }
+    CloseHandle(hFile);
+    return ok;
+}
+
+
+/*
+ * Copy the current frame from the renderer into a newly allocated buffer.
+ */
+static HRESULT GrabStillImage(IBasicVideo *pBV, BYTE **ppDIB, DWORD *pcbDIB)
+{
+    long cbDIB = 0;
+    HRESULT hr = pBV->GetCurrentImage(&cbDIB, NULL);
+    if(FAILED(hr))
+        return hr;
+    if(cbDIB <= 0)
+        return E_FAIL;
+
+    BYTE *pDIB = (BYTE *)CoTaskMemAlloc(cbDIB);
+    if(pDIB == NULL)
+        return E_OUTOFMEMORY;
+
+    hr = pBV->GetCurrentImage(&cbDIB, (long *)pDIB);
+    if(FAILED(hr))
+    {
+        CoTaskMemFree(pDIB);
+        return hr;
+    }
+
+    *ppDIB = pDIB;
+    *pcbDIB = (DWORD)cbDIB;
+    return S_OK;
+}
+
+
+/*
+ * Save the current preview/capture frame as a bitmap in the current directory.
+ */
+BOOL SaveSnapshot(HWND hWnd)
+{
+    HRESULT hr;
+    IBasicVideo *pBV = NULL;
+    IMediaControl *pMC = NULL;
+    OAFilterState state;
+    BYTE *pDIB = NULL;
+    DWORD cbDIB = 0;
+    BOOL result = FALSE;
+    TCHAR szFile[_MAX_PATH];
+
+    if(gcap.pFg == NULL || (!gcap.fPreviewing && !gcap.fCapturing))
+    {
+        ErrMsg(TEXT("请先打开预览或开始采集"));
+        return FALSE;
+    }
+
+    hr = gcap.pFg->QueryInterface(IID_IBasicVideo, (void **)&pBV);
+    if(FAILED(hr) || pBV == NULL)
+    {
+        ErrMsg(TEXT("当前滤镜图不支持截图"));
+        return FALSE;
+    }
+
+    if(FAILED(gcap.pFg->QueryInterface(IID_IMediaControl, (void **)&pMC)))
+        pMC = NULL;
+
+    hr = GrabStillImage(pBV, &pDIB, &cbDIB);
+    if(FAILED(hr) && pMC != NULL && !gcap.fCapturing)
+    {
+        // The classic Video Renderer requires a completed pause.
+        HRESULT pauseHr = pMC->Pause();
+        if(SUCCEEDED(pauseHr))
+        {
+            state = State_Stopped;
+            pauseHr = pMC->GetState(2000, &state);
+            if(pauseHr == S_OK && state == State_Paused)
+                hr = GrabStillImage(pBV, &pDIB, &cbDIB);
+            else
+                hr = FAILED(pauseHr) ? pauseHr : VFW_E_TIMEOUT;
+            pMC->Run();
+        }
+        else
+            hr = pauseHr;
+    }
+
+    pBV->Release();
+    if(pMC)
+        pMC->Release();
+
+    if(FAILED(hr) || pDIB == NULL)
+    {
+        if(pDIB)
+            CoTaskMemFree(pDIB);
+        ErrMsg(TEXT("无法获取当前画面（错误 0x%08x）"), hr);
+        return FALSE;
+    }
+
+    MakeDefaultCaptureFileName(szFile, NUMELMS(szFile), TEXT(".bmp"));
+    result = WriteDibToBmp(szFile, pDIB, cbDIB);
+    CoTaskMemFree(pDIB);
+
+    if(result)
+    {
+        TCHAR tach[_MAX_PATH + 32];
+        wsprintf(tach, TEXT("截图已保存：%s"), szFile);
+        statusUpdateStatus(ghwndStatus, tach);
+    }
+    else
+    {
+        ErrMsg(TEXT("保存截图失败"));
+    }
+
+    return result;
+}
+
+
+/*
  * Put up a dialog to allow the user to select a capture file.
  */
 BOOL SetCaptureFile(HWND hWnd)
@@ -4254,6 +4503,7 @@ BOOL SetCaptureFile(HWND hWnd)
         gcap.pSink->SetFileName(T2W(gcap.szCaptureFile), NULL);
     }
 
+    gcap.fCaptureFileSetByUser = TRUE;
     return TRUE;
 }
 

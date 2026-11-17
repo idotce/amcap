@@ -133,6 +133,7 @@ typedef PDEV_BROADCAST_DEVICEINTERFACE_A  PDEV_BROADCAST_DEVICEINTERFACE;
 #define MENU_DIALOGE        56
 #define MENU_DIALOGF        57
 #define MENU_MPEG2          58  // !!! more?
+#define MENU_SNAPSHOT       59
 
 
 // Dialogs
