@@ -50,7 +50,7 @@ BEGIN
         END
     POPUP "采集(&C)"
         BEGIN
-            MENUITEM "截图"                     , MENU_SNAPSHOT
+            MENUITEM "截图\tP"                     , MENU_SNAPSHOT
             MENUITEM SEPARATOR
             MENUITEM "开始采集(&S)"       , MENU_START_CAP
             MENUITEM "停止采集(&P)"        , MENU_STOP_CAP
@@ -70,6 +70,14 @@ BEGIN
         BEGIN
             MENUITEM "关于(&A)..."            , MENU_ABOUT
         END
+END
+
+//
+// Accelerators
+//
+ID_APP ACCELERATORS
+BEGIN
+    "P", MENU_SNAPSHOT, VIRTKEY
 END
 
 //

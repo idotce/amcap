@@ -1596,9 +1596,12 @@ BOOL InitCapFilters()
 
     if(gcap.pACap == NULL)
     {
-        // there are no audio capture devices. We'll only allow video capture
-        gcap.fCapAudio = FALSE;
-        ErrMsg(TEXT("无法创建音频采集滤镜"));
+        if(gcap.fCapAudio)
+        {
+            gcap.fCapAudio = FALSE;
+            ErrMsg(TEXT("无法创建音频采集滤镜，已取消采集音频。"));
+            WriteAppProfileString(TEXT("annie"), TEXT("CaptureAudio"), TEXT("0"));
+        }
         goto SkipAudio;
     }
 
